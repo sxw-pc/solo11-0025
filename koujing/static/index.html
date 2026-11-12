@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>口径校对台 · 本地只读视图</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">口</span>
+      <div>
+        <h1>口径校对台</h1>
+        <p>指标口径字典 × SQL 报表口径核对 · 本地只读</p>
+      </div>
+    </div>
+    <span class="offline">OFFLINE</span>
+  </header>
+
+  <div class="shell">
+    <aside class="sidebar" aria-label="批次历史">
+      <div class="side-head">
+        <h2>比对批次</h2>
+        <span id="batch-count" class="counter">0</span>
+      </div>
+      <div id="batches" class="batch-list">
+        <p class="placeholder">正在读取本地批次…</p>
+      </div>
+      <p class="side-note">数据来自本机 SQLite，服务只提供 GET 读取。</p>
+    </aside>
+
+    <main id="main" class="main" tabindex="-1">
+      <section id="empty" class="empty-state">
+        <div class="empty-mark">∅</div>
+        <h2>还没有可比对的批次</h2>
+        <p>先在项目根目录执行：</p>
+        <code>python -m koujing check fixtures/reports</code>
+        <p class="muted">完成后刷新页面即可查看四类口径结论。</p>
+      </section>
+      <section id="detail" hidden>
+        <div class="detail-head">
+          <div>
+            <p id="batch-kicker" class="kicker"></p>
+            <h2 id="batch-title"></h2>
+            <p id="batch-meta" class="muted"></p>
+          </div>
+          <a id="download" class="download" download>下载 report.json</a>
+        </div>
+        <div id="summary" class="summary" aria-label="结论计数"></div>
+        <div id="groups"></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="drawer" class="drawer" hidden aria-hidden="true">
+    <div class="drawer-backdrop" data-close="1"></div>
+    <section class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+      <div class="drawer-head">
+        <h2 id="drawer-title">证据详情</h2>
+        <button id="drawer-close" class="icon-button" type="button" aria-label="关闭">×</button>
+      </div>
+      <pre id="drawer-content"></pre>
+    </section>
+  </div>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+
+[dev]
+pytest>=7
+
+[enhanced]
+sqlglot>=20
+PyYAML>=6

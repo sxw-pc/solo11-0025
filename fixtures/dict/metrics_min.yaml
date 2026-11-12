@@ -1,0 +1,10 @@
+metrics:
+  - metric: active_user
+    owner: growth_analytics
+    description: 最小样例：登录用户数
+    source_tables: [fact_login]
+    source_fields: [user_id, login_at, event_type, status]
+    aggregation: count_distinct
+    filter_expr: "event_type = 'login' and status = 'ok'"
+    granularity: day
+    version: 1.0.0

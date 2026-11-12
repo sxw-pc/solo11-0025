@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "koujing"
+version = "1.0.0"
+description = "Offline metric dictionary and SQL report semantics checker"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+authors = [{ name = "Metric Governance Lab" }]
+keywords = ["metrics", "semantics", "sql", "offline", "governance"]
+
+[project.optional-dependencies]
+enhanced = ["sqlglot>=20", "PyYAML>=6"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+koujing = "koujing.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["koujing*"]
+
+[tool.setuptools.package-data]
+koujing = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
