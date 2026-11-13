@@ -167,9 +167,10 @@ def render_html(batch: dict[str, Any], findings: Iterable[Finding | dict[str, An
             f' <span>{len(group)}</span></a>'
         )
         cards = "".join(_html_finding(item) for item in group)
+        empty_card = '<p class="muted">无</p>'
         sections.append(
             f'<section id="{anchor}"><h2>{html.escape(CATEGORY_LABELS[category])} '
-            f'<span class="pill">{len(group)}</span></h2>{cards or "<p class=\"muted\">无</p>"}</section>'
+            f'<span class="pill">{len(group)}</span></h2>{cards or empty_card}</section>'
         )
     style = """
 body{margin:0;background:#f4f6f8;color:#17202a;font:15px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}

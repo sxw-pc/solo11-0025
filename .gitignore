@@ -6,3 +6,10 @@ data/
 out/
 *.db
 *.sqlite
+venv/
+node_modules/
+*.pyc
+.coverage
+.benchmarks/
+.env
+dist/
