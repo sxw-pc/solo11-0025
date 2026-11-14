@@ -10,7 +10,14 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from . import __version__
-from .compare import Finding, compare_reports, failing_categories, summarise
+from .compare import (
+    DictionaryEvolution,
+    Finding,
+    compare_dictionary_versions,
+    compare_reports,
+    failing_categories,
+    summarise,
+)
 from .config import (
     CATEGORIES,
     DEFAULT_DB,
@@ -39,6 +46,7 @@ class CheckResult:
     batch: dict
     findings: list[Finding]
     files: dict[str, Path]
+    evolution: DictionaryEvolution | None = None
 
 
 def _report_label(path: Path, reports_root: Path) -> str:
@@ -82,12 +90,21 @@ def _parse_fail_on(values: Iterable[str] | None) -> list[str]:
 def run_check(report_dir: str | Path, *, dict_path: str | Path = DEFAULT_DICT,
               db_path: str | Path = DEFAULT_DB, out_dir: str | Path = DEFAULT_OUT,
               parser_mode: str = "auto", now: datetime | None = None,
-              progress: bool = False) -> CheckResult:
-    """Run a full check. Raises DictValidationError or CliError on bad input."""
+              progress: bool = False,
+              baseline_dict_path: str | Path | None = None) -> CheckResult:
+    """Run a full check. Raises DictValidationError or CliError on bad input.
+
+    When *baseline_dict_path* is given the same parsed reports are also judged
+    against that baseline dictionary; the current dictionary still decides the
+    batch identity, the persisted findings and all file paths.
+    """
     if parser_mode not in PARSER_MODES:
         raise CliError(f"未知解析器模式: {parser_mode}")
     reports, reports_root = discover_reports(report_dir)
     dictionary: Dictionary = load_dictionary(dict_path)
+    baseline_dictionary: Dictionary | None = None
+    if baseline_dict_path is not None:
+        baseline_dictionary = load_dictionary(baseline_dict_path)
     parsed_reports: list[tuple[str, object]] = []
     for report_path in reports:
         try:
@@ -99,6 +116,12 @@ def run_check(report_dir: str | Path, *, dict_path: str | Path = DEFAULT_DICT,
         if progress:
             print(f"parsed {report_path.name} via {parsed.source}", file=sys.stderr)
     findings = compare_reports(parsed_reports, dictionary)
+    evolution: DictionaryEvolution | None = None
+    if baseline_dictionary is not None:
+        baseline_findings = compare_reports(parsed_reports, baseline_dictionary)
+        evolution = compare_dictionary_versions(
+            baseline_findings, findings, baseline_dictionary, dictionary
+        )
     counts = summarise(findings)
     batch_id = make_batch_id(dictionary.fingerprint, now)
     batch = {
@@ -116,8 +139,8 @@ def run_check(report_dir: str | Path, *, dict_path: str | Path = DEFAULT_DICT,
         dictionary.raw_text,
         source_path=relative_display(dictionary.source_path),
     )
-    files = write_reports(batch, findings, out_dir)
-    return CheckResult(batch=batch, findings=findings, files=files)
+    files = write_reports(batch, findings, out_dir, evolution)
+    return CheckResult(batch=batch, findings=findings, files=files, evolution=evolution)
 
 
 def _print_summary(result: CheckResult) -> None:
@@ -142,6 +165,17 @@ def _print_dict_errors(exc: DictValidationError) -> None:
         print(f"- [{error.get('code')}] {error.get('message')}{suffix}", file=sys.stderr)
 
 
+def _print_evolution(result: CheckResult) -> None:
+    evolution = result.evolution
+    if evolution is None:
+        return
+    counts = evolution.counts()
+    changed = len(evolution.changes())
+    detail = " ".join(f"{name}={counts[name]}" for name in counts)
+    print(f"baseline_dict={evolution.baseline_fingerprint[:8]} "
+          f"changes={changed} {detail}")
+
+
 def _cmd_check(args: argparse.Namespace) -> int:
     try:
         fail_on = _parse_fail_on(args.fail_on)
@@ -151,6 +185,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
             db_path=args.db,
             out_dir=args.out,
             parser_mode=args.parser,
+            baseline_dict_path=args.baseline_dict,
         )
     except DictValidationError as exc:
         _print_dict_errors(exc)
@@ -163,6 +198,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
         return 2
     if not args.quiet:
         _print_summary(result)
+        _print_evolution(result)
     blocked = failing_categories(result.findings, fail_on)
     if blocked:
         if not args.quiet:
@@ -235,6 +271,8 @@ def build_parser() -> argparse.ArgumentParser:
     check = subparsers.add_parser("check", help="解析报表目录并生成核对批次")
     check.add_argument("reports", help="包含 .sql 报表的目录")
     check.add_argument("--dict", default=str(DEFAULT_DICT), help="口径字典 YAML/JSON")
+    check.add_argument("--baseline-dict", default=None, metavar="PATH",
+                       help="基准口径字典 YAML/JSON；提供后附出口径演进比对")
     check.add_argument("--db", default=str(DEFAULT_DB), help="SQLite 数据库路径")
     check.add_argument("--out", default=str(DEFAULT_OUT), help="报告输出根目录")
     check.add_argument("--parser", choices=PARSER_MODES, default="auto",

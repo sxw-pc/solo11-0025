@@ -1,0 +1,48 @@
+# Synthetic "next" dictionary used to demonstrate cross-version comparison.
+# Compared with metrics.yaml:
+#   - active_user aggregation changes count_distinct -> count (tightens two
+#     reports, relaxes the intentionally drifting one)
+#   - weekly_retention is newly registered
+metrics:
+  - metric: order_gmv
+    owner: growth_analytics
+    description: 支付成功订单的成交金额合计
+    source_tables:
+      - fact_order
+    source_fields:
+      - pay_amount
+      - order_paid_at
+      - order_status
+    aggregation: sum
+    filter_expr: "order_status = 'paid'"
+    granularity: day
+    version: 1.4.0
+
+  - metric: active_user
+    owner: growth_analytics
+    description: 当日登录成功且状态正常的用户数（不再去重）
+    source_tables:
+      - fact_login
+    source_fields:
+      - user_id
+      - login_at
+      - event_type
+      - status
+    aggregation: count
+    filter_expr: "event_type = 'login' and status = 'ok'"
+    granularity: day
+    version: 2.0.0
+
+  - metric: weekly_retention
+    owner: growth_analytics
+    description: 按日统计的 Web 端会话去重数
+    source_tables:
+      - fact_session
+    source_fields:
+      - session_id
+      - session_started_at
+      - platform
+    aggregation: count_distinct
+    filter_expr: "platform = 'web'"
+    granularity: day
+    version: 1.0.0

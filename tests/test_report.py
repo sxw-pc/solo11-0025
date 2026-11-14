@@ -101,3 +101,80 @@ def test_unsafe_batch_id_is_rejected(dictionary, tmp_path):
     unsafe = dict(batch_dict(), batch_id="../escape")
     with pytest.raises(ValueError):
         write_reports(unsafe, make_findings(dictionary), tmp_path)
+
+
+def evolution_fixture(dictionary):
+    from koujing.compare import compare_dictionary_versions
+    from conftest import DICT_MIN
+    from koujing.dict_load import load_dictionary
+
+    current = make_findings(dictionary)
+    baseline_dict = load_dictionary(DICT_MIN, yaml_backend="lite")
+    reports = []
+    for path in sorted(REPORT_DIR.glob("*.sql")):
+        parsed = parse_sql(path.read_text(encoding="utf-8"), mode="fallback")
+        reports.append((f"fixtures/reports/{path.name}", parsed))
+    baseline = compare_reports(reports, baseline_dict)
+    return compare_dictionary_versions(baseline, current, baseline_dict, dictionary)
+
+
+def test_default_payload_has_no_evolution_key(dictionary):
+    assert "dictionary_evolution" not in build_payload(batch_dict(), make_findings(dictionary))
+
+
+def test_json_payload_appends_evolution_without_changing_existing_fields(dictionary):
+    payload = build_payload(batch_dict(), make_findings(dictionary),
+                            evolution_fixture(dictionary))
+    assert payload["schema_version"] == 1
+    assert payload["summary"] == {
+        "consistent": 3, "drift": 1, "missing_field": 1, "unregistered": 1
+    }
+    assert len(payload["findings"]) == 6
+    evolution = payload["dictionary_evolution"]
+    assert evolution["baseline_dict_fingerprint"]
+    assert evolution["current_dict_fingerprint"]
+    assert set(evolution["statuses"]) == {
+        "unchanged", "tightened", "relaxed", "newly_registered", "dictionary_removed"
+    }
+    assert evolution["changes"]
+    for change in evolution["changes"]:
+        assert set(change) >= {
+            "report", "metric", "baseline_category", "current_category", "status"
+        }
+        assert change["report"].startswith("fixtures/reports/")
+
+
+def test_markdown_has_evolution_section_with_status_counts_and_changes(dictionary):
+    markdown = render_markdown(batch_dict(), make_findings(dictionary),
+                               evolution_fixture(dictionary))
+    assert "## 口径演进" in markdown
+    assert "### 迁移状态汇总" in markdown
+    assert "### 按指标汇总" in markdown
+    assert "### 变动条目" in markdown
+    assert "| `newly_registered` | 新登记 |" in markdown
+    assert "fixtures/reports/ok_order_gmv.sql" in markdown
+
+
+def test_html_has_evolution_section(dictionary):
+    document = render_html(batch_dict(), make_findings(dictionary),
+                           evolution_fixture(dictionary))
+    assert 'id="dictionary-evolution"' in document
+    assert "口径演进" in document
+    assert "http://" not in document
+    assert "https://" not in document
+
+
+def test_evolution_does_not_change_report_paths_or_batch(dictionary, tmp_path):
+    plain_files = write_reports(batch_dict(), make_findings(dictionary), tmp_path / "a")
+    evo_files = write_reports(batch_dict(), make_findings(dictionary),
+                              tmp_path / "b", evolution_fixture(dictionary))
+    assert {name: path.name for name, path in plain_files.items()} == {
+        name: path.name for name, path in evo_files.items()
+    }
+    assert plain_files["json"].relative_to(tmp_path / "a") == \
+        evo_files["json"].relative_to(tmp_path / "b")
+    plain = json.loads(plain_files["json"].read_text(encoding="utf-8"))
+    evo = json.loads(evo_files["json"].read_text(encoding="utf-8"))
+    assert plain["batch"] == evo["batch"]
+    assert plain["findings"] == evo["findings"]
+    assert plain["summary"] == evo["summary"]

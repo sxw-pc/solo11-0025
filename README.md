@@ -60,7 +60,31 @@ python -m koujing history --limit 10
 python -m koujing export <batch_id>
 python -m koujing check fixtures/reports --parser fallback --quiet
 python -m koujing check fixtures/reports --dict fixtures/dict/metrics_min.yaml
+
+# 月末对账：同一批报表同时用基准字典与当前字典比对，附“口径演进”一节
+python -m koujing check fixtures/reports --baseline-dict fixtures/dict/metrics.yaml \
+  --dict fixtures/dict/metrics_next.yaml
 ```
+
+### 跨版本核对（`--baseline-dict`）
+
+`--baseline-dict <path>` 是显式开关：不提供时行为与之前完全一致，批次号仍只由
+**当前字典**指纹生成，SQLite 落库内容与 `out/<batch_id>/report.{md,json,html}`
+路径都不变。提供后，同一批已解析报表会再用基准字典判一遍，两次结论按
+“报表路径 + 指标名”对齐并附加迁移状态；`report.json` 在保持 `schema_version`
+与既有 `findings` 结构的前提下多出 `dictionary_evolution` 键。
+
+| 状态 | 含义 |
+| --- | --- |
+| `unchanged` | 两次类别相同 |
+| `tightened` | 类别按判定优先级变严（如 `drift` → `missing_field`，或 `consistent` → 任意非一致） |
+| `relaxed` | 类别变宽（如 `drift` → `consistent`，或 `missing_field` → `drift`） |
+| `newly_registered` | 基准字典未登记、当前字典已登记该指标 |
+| `dictionary_removed` | 基准字典已登记、当前字典已删除该指标（当前结论通常为 `unregistered`） |
+
+同一报表同一指标出现多条 finding 时，用聚合表达式与聚合函数作为出现次序判别，
+再按与字典无关的源码行序配对。粒度或过滤表达式变化导致的 `consistent` → `drift`
+会记为 `tightened`（反向为 `relaxed`）。
 
 ## 口径字典
 
@@ -119,9 +143,13 @@ metrics:
 
 一次 `check` 生成：
 
-- `report.md`：按四类分组的可读报告；
-- `report.json`：机读结构，包含 `schema_version`、批次元数据、汇总和逐条证据；
+- `report.md`：按四类分组的可读报告；指定 `--baseline-dict` 时追加“口径演进”一节；
+- `report.json`：机读结构，包含 `schema_version`、批次元数据、汇总和逐条证据
+  （指定 `--baseline-dict` 时附加 `dictionary_evolution`）；
 - `report.html`：单文件、内联样式、无外部资源的可归档页面。
+
+“口径演进”按指标汇总各迁移状态的数量，并逐条列出变动条目（报表、指标、基准
+结论、当前结论、状态）。
 
 SQLite 表结构由 `store.py` 幂等创建：
 
@@ -155,7 +183,7 @@ koujing/
   dict_load.py               字典加载、校验、规范化和指纹
   yaml_lite.py               零依赖 YAML 子集解析器
   sql_parse/                 主解析器、降级解析器、统一模型与词法工具
-  compare.py                 结构比对与四类结论
+  compare.py                 结构比对、四类结论与跨版本对齐
   report.py                  Markdown / JSON / HTML 渲染
   store.py                   SQLite 建表、迁移与查询
   server.py                  回环只读 HTTP 服务
@@ -183,6 +211,7 @@ tests/                       无网络单元与集成测试
 - 三格式报告、JSON 结构、HTML 自包含、路径防穿越；
 - SQLite 幂等写入、批次/类别/指标历史查询、可注入时钟；
 - CLI 默认退出码、`--fail-on`、`--quiet`、history/export、模块入口；
+- 跨版本核对：对齐、迁移方向（收紧/放宽）、新登记/字典移除、粒度与过滤变化、重复指标对齐；
 - HTTP 只读、下载、非法 Host、路径穿越、方法拒绝与审计。
 
 ## 已知限制

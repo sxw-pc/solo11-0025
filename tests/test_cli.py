@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 
-from conftest import DICT_YAML, REPORT_DIR, ROOT, write_dict
+from conftest import DICT_MIN, DICT_YAML, REPORT_DIR, ROOT, write_dict
 from koujing.cli import main
 from koujing.store import Store
 
@@ -112,3 +113,69 @@ def test_module_entrypoint_and_repeat_batches(tmp_path):
     assert second.returncode == 0, second.stderr
     assert len(out_batches(tmp_path)) == 2
     assert Store(tmp_path / "koujing.db").count_batches() == 2
+
+
+def test_baseline_dict_appends_evolution_and_keeps_paths(tmp_path, capsys):
+    extra = ["--baseline-dict", str(DICT_MIN)]
+    code = main(check_args(tmp_path, *extra))
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "baseline_dict=" in captured.out
+    batches = out_batches(tmp_path)
+    assert len(batches) == 1
+    assert {path.name for path in batches[0].iterdir()} == {
+        "report.md", "report.json", "report.html"
+    }
+    batch_id = batches[0].name
+    assert batch_id.endswith("-18c1de24")  # current dictionary fingerprint
+    report = (batches[0] / "report.md").read_text(encoding="utf-8")
+    assert "## 口径演进" in report
+    store = Store(tmp_path / "koujing.db")
+    assert store.count_batches() == 1
+    batch = store.get_batch(batch_id)
+    assert batch["dict_fingerprint"].startswith("18c1de24")
+    stored = store.get_findings(batch_id)
+    assert len(stored) == 6
+
+
+def test_baseline_dict_does_not_change_batch_or_default_report_paths(tmp_path):
+    from datetime import datetime, timezone
+
+    from koujing.cli import run_check
+
+    fixed_now = datetime(2026, 1, 2, 3, 4, 5, 678901, tzinfo=timezone.utc)
+    plain = run_check(
+        REPORT_DIR, dict_path=DICT_YAML, db_path=tmp_path / "plain.db",
+        out_dir=tmp_path / "plain", parser_mode="fallback", now=fixed_now,
+    )
+    baseline = run_check(
+        REPORT_DIR, dict_path=DICT_YAML, db_path=tmp_path / "baseline.db",
+        out_dir=tmp_path / "baseline", parser_mode="fallback", now=fixed_now,
+        baseline_dict_path=DICT_MIN,
+    )
+    assert plain.batch["batch_id"] == baseline.batch["batch_id"]
+    assert plain.files["json"].parent.name == baseline.files["json"].parent.name
+    plain_payload = json.loads(plain.files["json"].read_text(encoding="utf-8"))
+    baseline_payload = json.loads(baseline.files["json"].read_text(encoding="utf-8"))
+    assert plain_payload["batch"] == baseline_payload["batch"]
+    assert plain_payload["findings"] == baseline_payload["findings"]
+    assert plain_payload["summary"] == baseline_payload["summary"]
+    assert "dictionary_evolution" not in plain_payload
+    assert "dictionary_evolution" in baseline_payload
+
+
+def test_invalid_baseline_dictionary_returns_two(tmp_path, capsys):
+    bad = write_dict(tmp_path, "metrics:\n  - metric: only_name\n")
+    code = main(check_args(tmp_path, "--baseline-dict", str(bad)))
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "口径字典校验失败" in captured.err
+    assert not (tmp_path / "out").exists()
+
+
+def test_quiet_suppresses_evolution_output(tmp_path, capsys):
+    code = main(check_args(tmp_path, "--baseline-dict", str(DICT_MIN), "--quiet"))
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == ""
+    assert (tmp_path / "out").exists()
