@@ -110,3 +110,42 @@ def test_read_error_is_structured(tmp_path):
     with pytest.raises(DictValidationError) as caught:
         load_dictionary(tmp_path / "absent.yaml")
     assert caught.value.errors[0]["code"] == "read_error"
+
+
+def test_business_day_start_minutes_is_optional_and_normalised():
+    legacy = dictionary_from_document({"metrics": [valid_metric()]})
+    assert legacy.metrics[0].business_day_start_minutes is None
+    # Evidence keeps the expected origin as None; only the fingerprint omits it.
+    assert legacy.metrics[0].to_dict()["business_day_start_minutes"] is None
+    assert "business_day_start_minutes" not in legacy.metrics[0].fingerprint_payload()
+
+    declared = dictionary_from_document(
+        {"metrics": [valid_metric(business_day_start_minutes=240)]}
+    )
+    assert declared.metrics[0].business_day_start_minutes == 240
+    assert declared.metrics[0].to_dict()["business_day_start_minutes"] == 240
+    assert declared.fingerprint != legacy.fingerprint
+
+
+@pytest.mark.parametrize("bad_value", ["240", 1.5, -1, 1440, True, False])
+def test_business_day_start_minutes_rejects_invalid_values(bad_value):
+    errors = errors_for(
+        {"metrics": [valid_metric(business_day_start_minutes=bad_value)]}
+    )
+    assert any(error["code"] == "invalid_business_day_start"
+               and error["field"] == "business_day_start_minutes"
+               for error in errors)
+
+
+def test_business_day_start_minutes_only_allowed_for_day_granularity():
+    errors = errors_for({"metrics": [
+        valid_metric(granularity="week", business_day_start_minutes=240)
+    ]})
+    assert any(error["code"] == "invalid_business_day_start" for error in errors)
+
+
+def test_zero_business_day_start_minutes_is_a_valid_declaration():
+    dictionary = dictionary_from_document(
+        {"metrics": [valid_metric(business_day_start_minutes=0)]}
+    )
+    assert dictionary.metrics[0].business_day_start_minutes == 0

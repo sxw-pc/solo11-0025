@@ -96,3 +96,25 @@ def test_granularity_variants():
     assert month.granularity == "month"
     assert plain.granularity == "row"
     assert none.granularity == "none"
+
+
+def test_business_day_origin_extraction():
+    base = ("SELECT SUM(amount) AS sample_metric FROM fact_sample "
+            "WHERE status = 'ok' GROUP BY {};")
+    midnight = parse_fallback(base.format("DATE_TRUNC('day', event_at)"))
+    four_hour = parse_fallback(base.format(
+        "DATE_TRUNC('day', event_at - INTERVAL '4' HOUR)"))
+    minute_form = parse_fallback(base.format(
+        "DATE_TRUNC('day', event_at - INTERVAL '240' MINUTE)"))
+    dynamic = parse_fallback(base.format(
+        "DATE_TRUNC('day', event_at - offset_minutes * INTERVAL '1' MINUTE)"))
+    month = parse_fallback(base.format("DATE_TRUNC('month', event_at)"))
+
+    assert midnight.granularity == "day" and midnight.day_origin_minutes == 0
+    assert four_hour.granularity == "day" and four_hour.day_origin_minutes == 240
+    assert minute_form.day_origin_minutes == 240
+    assert dynamic.day_origin_minutes == -1
+    assert month.day_origin_minutes is None
+    # Interval unit words must not be mistaken for column references.
+    assert "hour" not in four_hour.select_fields
+    assert "minute" not in minute_form.select_fields

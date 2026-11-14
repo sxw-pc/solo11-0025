@@ -53,3 +53,22 @@ def test_primary_parser_handles_quoted_aliases():
     assert parsed.tables == ("fact_sample",)
     assert [item.alias for item in parsed.aggregates] == ["sample_metric", "latest_event"]
     assert parsed.granularity == "day"
+
+
+@pytest.mark.parametrize("expression, origin", [
+    ("DATE_TRUNC('day', event_at - INTERVAL '4' HOUR)", 240),
+    ("DATE_TRUNC('day', event_at - INTERVAL '240' MINUTE)", 240),
+    ("DATE_TRUNC('day', event_at)", 0),
+    ("DATE_TRUNC('day', event_at - offset_minutes * INTERVAL '1' MINUTE)", -1),
+])
+def test_primary_and_fallback_agree_on_business_day_origin(expression, origin):
+    sql = (
+        "SELECT SUM(amount) AS sample_metric FROM fact_sample "
+        f"WHERE status = 'ok' GROUP BY {expression};"
+    )
+    primary = parse_primary(sql)
+    fallback = parse_sql(sql, mode="fallback")
+    assert primary.comparable() == fallback.comparable()
+    assert primary.granularity == "day"
+    assert primary.day_origin_minutes == origin
+    assert fallback.day_origin_minutes == origin

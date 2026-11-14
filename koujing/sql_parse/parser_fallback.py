@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from .common import extract_identifiers, line_range, split_top_level, strip_comments, top_level_words
-from .model import Aggregate, ParsedQuery, canonical_expr, detect_granularity, sort_unique
+from .model import Aggregate, ParsedQuery, canonical_expr, detect_time_grain, sort_unique
 
 AGGREGATE_RE = re.compile(
     r"^(count|sum|avg|max|min)\s*\((.*)\)\s*(?:(?:as\s+)?([A-Za-z_][A-Za-z0-9_]*))?\s*$",
@@ -144,6 +144,7 @@ def parse_fallback(sql: str, *, source: str = "fallback",
             filter_expr="",
             group_by=(),
             granularity="none",
+            day_origin_minutes=None,
             warnings=tuple(warnings + ["no SELECT statement found"]),
             line_start=start_line,
             line_end=end_line,
@@ -175,6 +176,7 @@ def parse_fallback(sql: str, *, source: str = "fallback",
     for aggregate in aggregates:
         if not aggregate.alias:
             warnings.append(f"aggregate {aggregate.function} has no alias; no metric candidate")
+    granularity, day_origin_minutes = detect_time_grain(group_exprs)
     return ParsedQuery(
         source=source,
         tables=tables,
@@ -182,7 +184,8 @@ def parse_fallback(sql: str, *, source: str = "fallback",
         aggregates=tuple(aggregates),
         filter_expr=where_expr,
         group_by=group_exprs,
-        granularity=detect_granularity(group_exprs),
+        granularity=granularity,
+        day_origin_minutes=day_origin_minutes,
         warnings=tuple(dict.fromkeys(warnings)),
         line_start=start_line,
         line_end=end_line,

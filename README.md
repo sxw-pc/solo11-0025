@@ -76,6 +76,7 @@ python -m koujing check fixtures/reports --dict fixtures/dict/metrics_min.yaml
 | `aggregation` | 是 | `sum` / `count` / `count_distinct` / `avg` / `max` / `min` |
 | `filter_expr` | 否 | 规范化过滤表达式，可为空 |
 | `granularity` | 是 | 报表时间粒度，如 `day` / `week` / `month`；无分组为 `none` |
+| `business_day_start_minutes` | 否 | 仅 `day` 指标可选，业务日起点相对 UTC 零点的固定分钟数（`0..1439`）；不写则沿用旧的粒度标签规则 |
 | `version` | 是 | 口径版本号（字符串） |
 
 最小样例：
@@ -105,6 +106,16 @@ metrics:
 | `unregistered` | 报表聚合结果别名未在字典中登记 | 别名命中已登记指标 |
 
 判定优先级：**未登记 > 缺失字段 > 偏差 > 一致**。一条 finding 的证据包含报表相对路径、起止行号、解析器来源、期望/实际结构、差异明细和解析警告。结论按固定键排序（报表路径、类别、指标、行号），同等输入重复运行 deep-equal。
+
+### 业务日起点对账
+
+同为 `day` 粒度的报表可能从不同时刻开始统计：`DATE_TRUNC('day', event_at)` 从 UTC 零点起，而 `DATE_TRUNC('day', event_at - INTERVAL '4' HOUR)` 从 UTC 04:00 起。光凭 `day` 标签会把两者误判为同一种时间口径，因此引入可选的 `business_day_start_minutes`（业务日起点距 UTC 零点的分钟数）。
+
+- 仅支持 UTC 时间戳与固定分钟/小时 `INTERVAL` 偏移，不处理时区数据库或夏令时。
+- 解析器从 `DATE_TRUNC('day', ...)` 日分桶及其常量 `INTERVAL` 链提取同一语义；`INTERVAL '4' HOUR` 与 `INTERVAL '240' MINUTE` 等价（均为 240）。主解析器与降级解析器输出相同结构。
+- 动态偏移、非常量表达式或无法可靠解释的写法不会静默退回零点，而是在证据中标记 `day_origin_minutes: "unknown"`；字典声明了起点时这构成 `drift`。
+- 旧字典不写该字段时继续走原粒度标签规则，且字典指纹保持不变；fixture 的四类计数不变。
+
 
 ## 双解析器策略
 

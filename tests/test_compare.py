@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import REPORT_DIR
+from conftest import REPORT_DIR, valid_metric
 from koujing.compare import (
     compare_report,
     compare_reports,
@@ -10,7 +10,9 @@ from koujing.compare import (
     sort_findings,
     summarise,
 )
+from koujing.dict_load import dictionary_from_document
 from koujing.sql_parse import parse_sql
+from koujing.sql_parse.model import UNKNOWN_DAY_ORIGIN
 
 
 def reports_for(dictionary):
@@ -138,3 +140,170 @@ def test_unregistered_evidence_has_no_expected_metric(dictionary):
     assert finding.metric == "weekly_retention"
     assert finding.evidence["expected"] is None
     assert finding.evidence["observed"]["tables"] == ["fact_session"]
+
+
+# ---------------------------------------------------------------------------
+# Business-day origin reconciliation (UTC timestamps + constant minute offset)
+# ---------------------------------------------------------------------------
+
+def _day_metric(**overrides):
+    metric = valid_metric(
+        source_tables=["fact_sample"],
+        source_fields=["amount", "event_at", "status"],
+        granularity="day",
+    )
+    metric.update(overrides)
+    return metric
+
+
+def _day_report(day_expression: str) -> str:
+    return (
+        "SELECT SUM(amount) AS sample_metric FROM fact_sample "
+        f"WHERE status = 'ok' GROUP BY {day_expression};"
+    )
+
+
+def _finding_for(metric, sql, *, mode="fallback"):
+    dictionary = dictionary_from_document({"metrics": [metric]})
+    return compare_report("fixture.sql", parse_sql(sql, mode=mode), dictionary)[0]
+
+
+def test_minute_and_hour_offsets_are_equivalent_240_minutes():
+    """INTERVAL '4' HOUR and INTERVAL '240' MINUTE carry the same origin."""
+    metric = _day_metric(business_day_start_minutes=240)
+    hour_sql = _day_report("DATE_TRUNC('day', event_at - INTERVAL '4' HOUR)")
+    minute_sql = _day_report("DATE_TRUNC('day', event_at - INTERVAL '240' MINUTE)")
+
+    hour_finding = _finding_for(metric, hour_sql)
+    minute_finding = _finding_for(metric, minute_sql)
+
+    assert hour_finding.category == "consistent"
+    assert minute_finding.category == "consistent"
+    assert hour_finding.evidence["observed"]["day_origin_minutes"] == 240
+    assert minute_finding.evidence["observed"]["day_origin_minutes"] == 240
+    assert not any(
+        diff["field"] == "business_day_start_minutes"
+        for diff in hour_finding.differences
+    )
+
+
+def test_zero_and_four_hour_origin_produce_granularity_difference_evidence():
+    """Same 'day' label but different origins must not be treated as equal."""
+    metric = _day_metric(business_day_start_minutes=240)
+    midnight_sql = _day_report("DATE_TRUNC('day', event_at)")
+    four_hour_sql = _day_report("DATE_TRUNC('day', event_at - INTERVAL '4' HOUR)")
+
+    midnight = _finding_for(metric, midnight_sql)
+    four_hour = _finding_for(metric, four_hour_sql)
+
+    # The 04:00 report matches a 04:00 dictionary declaration.
+    assert four_hour.category == "consistent"
+    assert four_hour.evidence["observed"]["granularity"] == "day"
+    assert four_hour.evidence["observed"]["day_origin_minutes"] == 240
+
+    # The midnight report is still granularity 'day' but its origin differs.
+    assert midnight.category == "drift"
+    difference = next(diff for diff in midnight.differences
+                      if diff["field"] == "business_day_start_minutes")
+    assert difference == {"field": "business_day_start_minutes",
+                          "expected": 240, "actual": 0}
+    # No plain granularity-label difference: both sides are genuinely 'day'.
+    assert not any(diff["field"] == "granularity" for diff in midnight.differences)
+
+
+def test_dynamic_offset_is_explicitly_undecidable_not_silent_day():
+    """A non-constant offset must surface as unknown and never match silently."""
+    metric = _day_metric(
+        source_fields=["amount", "event_at", "offset_minutes", "status"],
+        business_day_start_minutes=240,
+    )
+    sql = _day_report(
+        "DATE_TRUNC('day', event_at - offset_minutes * INTERVAL '1' MINUTE)"
+    )
+    finding = _finding_for(metric, sql)
+
+    assert finding.category == "drift"
+    assert finding.evidence["observed"]["granularity"] == "day"
+    assert finding.evidence["observed"]["day_origin_minutes"] == "unknown"
+    difference = next(diff for diff in finding.differences
+                      if diff["field"] == "business_day_start_minutes")
+    assert difference == {"field": "business_day_start_minutes",
+                          "expected": 240, "actual": "unknown"}
+
+
+def test_undecidable_origin_does_not_match_a_zero_origin_dictionary():
+    """Unknown must not collapse to zero, even when zero is the expected origin."""
+    metric = _day_metric(business_day_start_minutes=0)
+    sql = _day_report(
+        "DATE_TRUNC('day', event_at AT TIME ZONE 'UTC')"
+    )
+    finding = _finding_for(metric, sql)
+    assert finding.category == "drift"
+    difference = next(diff for diff in finding.differences
+                      if diff["field"] == "business_day_start_minutes")
+    assert difference["expected"] == 0
+    assert difference["actual"] == "unknown"
+
+
+def test_legacy_dictionary_without_field_keeps_granularity_only_rule():
+    """Old dictionaries keep the legacy rule and never raise origin drift."""
+    legacy_metric = _day_metric()  # no business_day_start_minutes
+    midnight_sql = _day_report("DATE_TRUNC('day', event_at)")
+    four_hour_sql = _day_report("DATE_TRUNC('day', event_at - INTERVAL '4' HOUR)")
+
+    midnight = _finding_for(legacy_metric, midnight_sql)
+    four_hour = _finding_for(legacy_metric, four_hour_sql)
+
+    # Both are 'day'; without a declared origin there is no origin difference.
+    assert midnight.category == "consistent"
+    assert four_hour.category == "consistent"
+    assert not any(
+        diff["field"] == "business_day_start_minutes"
+        for diff in midnight.differences + four_hour.differences
+    )
+    # The observed origin is still recorded for the report and ledger.
+    assert midnight.evidence["observed"]["day_origin_minutes"] == 0
+    assert four_hour.evidence["observed"]["day_origin_minutes"] == 240
+    # The legacy expected metric explicitly carries an unset origin.
+    assert midnight.evidence["expected"]["business_day_start_minutes"] is None
+
+
+def test_observed_and_expected_day_origin_are_both_retained_in_evidence():
+    """Reports and ledgers must preserve expected and actual day origins."""
+    metric = _day_metric(business_day_start_minutes=240)
+    sql = _day_report("DATE_TRUNC('day', event_at - INTERVAL '1' HOUR)")
+    finding = _finding_for(metric, sql)
+
+    assert finding.evidence["expected"]["business_day_start_minutes"] == 240
+    assert finding.evidence["observed"]["day_origin_minutes"] == 60
+    difference = next(diff for diff in finding.differences
+                      if diff["field"] == "business_day_start_minutes")
+    assert difference["expected"] == 240
+    assert difference["actual"] == 60
+    # The serialised form (what the ledger persists) keeps both values.
+    serialised = finding.to_dict()
+    assert serialised["evidence"]["expected"]["business_day_start_minutes"] == 240
+    assert serialised["evidence"]["observed"]["day_origin_minutes"] == 60
+
+
+@pytest.mark.parametrize("expression, expected_origin", [
+    ("DATE_TRUNC('day', event_at - INTERVAL '4' HOUR)", 240),
+    ("DATE_TRUNC('day', event_at - INTERVAL '240' MINUTE)", 240),
+    ("DATE_TRUNC('day', event_at)", 0),
+    ("DATE(event_at)", 0),
+    ("CAST(event_at AS DATE)", 0),
+    # A positive SQL shift wraps to the previous-day boundary.
+    ("DATE_TRUNC('day', event_at + INTERVAL '4' HOUR)", 1200),
+    ("DATE_TRUNC('day', event_at - offset_minutes * INTERVAL '1' MINUTE)",
+     UNKNOWN_DAY_ORIGIN),
+    ("DATE_TRUNC('month', event_at)", None),
+])
+def test_primary_and_fallback_report_identical_day_origin(expression, expected_origin):
+    """Both parsers must expose the same business-day origin structure."""
+    pytest.importorskip("sqlglot")
+    sql = _day_report(expression)
+    fallback = parse_sql(sql, mode="fallback")
+    primary = parse_sql(sql, mode="primary")
+    assert fallback.comparable() == primary.comparable()
+    assert fallback.day_origin_minutes == expected_origin
+    assert primary.day_origin_minutes == expected_origin

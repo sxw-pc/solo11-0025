@@ -32,8 +32,13 @@ class Metric:
     filter_expr: str
     granularity: str
     version: str
+    # Optional business-day start as minutes after UTC midnight. Only allowed
+    # for day-granularity metrics; ``None`` keeps the legacy granularity-only rule.
+    business_day_start_minutes: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        # Evidence always carries the expected origin (``None`` when undeclared)
+        # so reports and ledgers retain both expected and actual day origins.
         return {
             "metric": self.metric,
             "owner": self.owner,
@@ -44,7 +49,19 @@ class Metric:
             "filter_expr": self.filter_expr,
             "granularity": self.granularity,
             "version": self.version,
+            "business_day_start_minutes": self.business_day_start_minutes,
         }
+
+    def fingerprint_payload(self) -> dict[str, Any]:
+        """Normalised mapping used for the dictionary fingerprint.
+
+        The optional origin is omitted when undeclared so legacy dictionaries
+        keep their original fingerprint.
+        """
+        data = self.to_dict()
+        if data["business_day_start_minutes"] is None:
+            del data["business_day_start_minutes"]
+        return data
 
 
 @dataclass(frozen=True)
@@ -163,6 +180,9 @@ def _normalise_metric(raw: Any, index: int, errors: list[dict[str, Any]]) -> Met
     filter_expr = canonical_expr(raw.get("filter_expr"))
     granularity = str(raw.get("granularity", "")).strip().lower()
     version = str(raw.get("version", "")).strip()
+    business_day_start_minutes = _normalise_day_start(
+        raw.get("business_day_start_minutes"), granularity, name, index, errors
+    )
     return Metric(
         metric=name,
         owner=owner,
@@ -173,7 +193,37 @@ def _normalise_metric(raw: Any, index: int, errors: list[dict[str, Any]]) -> Met
         filter_expr=filter_expr,
         granularity=granularity,
         version=version,
+        business_day_start_minutes=business_day_start_minutes,
     )
+
+
+def _normalise_day_start(raw: Any, granularity: str, metric: str, index: int,
+                         errors: list[dict[str, Any]]) -> int | None:
+    """Validate the optional business-day origin, expressed in UTC minutes."""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        errors.append(_error(
+            "invalid_business_day_start",
+            "business_day_start_minutes must be an integer number of minutes",
+            index=index, metric=metric, field="business_day_start_minutes",
+        ))
+        return None
+    if not 0 <= raw < 24 * 60:
+        errors.append(_error(
+            "invalid_business_day_start",
+            "business_day_start_minutes must be within 0..1439 minutes",
+            index=index, metric=metric, field="business_day_start_minutes",
+        ))
+        return None
+    if granularity and granularity != "day":
+        errors.append(_error(
+            "invalid_business_day_start",
+            "business_day_start_minutes is only allowed for day-granularity metrics",
+            index=index, metric=metric, field="business_day_start_minutes",
+        ))
+        return None
+    return raw
 
 
 def dictionary_from_document(document: Any, *, source_path: str = "<memory>",
@@ -212,7 +262,7 @@ def dictionary_from_document(document: Any, *, source_path: str = "<memory>",
     if errors:
         raise DictValidationError(errors)
     metrics.sort(key=lambda item: item.metric)
-    payload = [item.to_dict() for item in metrics]
+    payload = [item.fingerprint_payload() for item in metrics]
     fingerprint = sha256_text(canonical_json(payload))
     return Dictionary(
         metrics=tuple(metrics),

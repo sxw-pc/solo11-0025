@@ -168,7 +168,20 @@ def clean_identifier(raw: str) -> str:
 
 def extract_identifiers(text: str) -> tuple[str, ...]:
     """Extract likely column references from a SQL expression fragment."""
-    cleaned = strip_string_literals(strip_comments(text))
+    cleaned = strip_comments(text)
+    # INTERVAL unit words (e.g. the HOUR in INTERVAL '4' HOUR) are temporal
+    # units, not column references; mask them before string literals are
+    # blanked so both parsers see the same identifier set.
+    cleaned = re.sub(
+        r"\binterval\s+(?:'(?:''|[^'])*'|\d+)\s*"
+        r"(?:second|minute|hour|day|week|month|quarter|year)s?\b",
+        " ",
+        cleaned,
+        flags=re.I,
+    )
+    # AT TIME ZONE '<zone>' is a conversion clause, not a column reference.
+    cleaned = re.sub(r"\bat\s+time\s+zone\b", " ", cleaned, flags=re.I)
+    cleaned = strip_string_literals(cleaned)
     cleaned = re.sub(r"\bas\s+[A-Za-z_][A-Za-z0-9_]*", " ", cleaned, flags=re.I)
     cleaned = re.sub(r"'(?:''|[^'])*'", " ", cleaned)
     found: set[str] = set()

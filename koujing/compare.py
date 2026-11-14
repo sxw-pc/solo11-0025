@@ -8,7 +8,14 @@ from typing import Any, Iterable
 from .config import CATEGORIES, CATEGORY_ORDER
 from .dict_load import Dictionary, Metric
 from .sql_parse.common import extract_identifiers
-from .sql_parse.model import ParsedQuery
+from .sql_parse.model import UNKNOWN_DAY_ORIGIN, ParsedQuery
+
+
+def _day_origin_value(value: int | None) -> int | str | None:
+    """Render the day origin for evidence: ints pass through, sentinel is explicit."""
+    if value == UNKNOWN_DAY_ORIGIN:
+        return "unknown"
+    return value
 
 
 @dataclass(frozen=True)
@@ -104,6 +111,7 @@ def _compare_metric(report: str, parsed: ParsedQuery, aggregate,
         "aggregation": aggregate.function,
         "filter_expr": parsed.filter_expr,
         "granularity": parsed.granularity,
+        "day_origin_minutes": _day_origin_value(parsed.day_origin_minutes),
         "group_by": list(parsed.group_by),
         "aggregate_expression": aggregate.expression,
     }
@@ -125,6 +133,17 @@ def _compare_metric(report: str, parsed: ParsedQuery, aggregate,
     if parsed.granularity != metric.granularity:
         differences.append(_difference("granularity", metric.granularity,
                                        parsed.granularity))
+    # Only a dictionary that declares a business-day origin enforces one;
+    # legacy dictionaries without the field keep the granularity-only rule.
+    if metric.business_day_start_minutes is not None and (
+        parsed.granularity != "day"
+        or parsed.day_origin_minutes != metric.business_day_start_minutes
+    ):
+        differences.append(_difference(
+            "business_day_start_minutes",
+            metric.business_day_start_minutes,
+            _day_origin_value(parsed.day_origin_minutes),
+        ))
 
     expected = metric.to_dict()
     if missing or extra:
@@ -147,6 +166,7 @@ def _compare_unregistered(report: str, parsed: ParsedQuery, aggregate) -> Findin
         "aggregation": aggregate.function,
         "filter_expr": parsed.filter_expr,
         "granularity": parsed.granularity,
+        "day_origin_minutes": _day_origin_value(parsed.day_origin_minutes),
         "group_by": list(parsed.group_by),
         "aggregate_expression": aggregate.expression,
     }

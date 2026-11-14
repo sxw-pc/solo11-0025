@@ -10,7 +10,7 @@ from .common import (
     strip_comments,
     top_level_words,
 )
-from .model import Aggregate, ParsedQuery, canonical_expr, detect_granularity, sort_unique
+from .model import Aggregate, ParsedQuery, canonical_expr, detect_time_grain, sort_unique
 
 
 class PrimaryParserUnavailable(RuntimeError):
@@ -133,6 +133,7 @@ def parse_primary(sql: str, *, dialect: str | None = None) -> ParsedQuery:
     clean = strip_comments(sql)
     start_line, end_line = line_range(sql)
     ordered_aggregates = tuple(aggregates)
+    granularity, day_origin_minutes = detect_time_grain(group_by)
     return ParsedQuery(
         source="primary",
         tables=sort_unique(table_names),
@@ -140,7 +141,8 @@ def parse_primary(sql: str, *, dialect: str | None = None) -> ParsedQuery:
         aggregates=ordered_aggregates,
         filter_expr=filter_expr,
         group_by=group_by,
-        granularity=detect_granularity(group_by),
+        granularity=granularity,
+        day_origin_minutes=day_origin_minutes,
         warnings=_warnings(clean, ordered_aggregates, tuple(sorted(table_names))),
         line_start=start_line,
         line_end=end_line,
