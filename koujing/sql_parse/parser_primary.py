@@ -10,7 +10,15 @@ from .common import (
     strip_comments,
     top_level_words,
 )
-from .model import Aggregate, ParsedQuery, canonical_expr, detect_granularity, sort_unique
+from .model import (
+    Aggregate,
+    ParsedQuery,
+    canonical_expr,
+    detect_granularity,
+    duplicate_alias_warnings,
+    normalise_alias,
+    sort_unique,
+)
 
 
 class PrimaryParserUnavailable(RuntimeError):
@@ -76,6 +84,7 @@ def _warnings(clean: str, aggregates: tuple[Aggregate, ...], tables: tuple[str, 
     for aggregate in aggregates:
         if not aggregate.alias:
             warnings.append(f"aggregate {aggregate.function} has no alias; no metric candidate")
+    warnings.extend(duplicate_alias_warnings(aggregates))
     return tuple(dict.fromkeys(warnings))
 
 
@@ -102,6 +111,7 @@ def parse_primary(sql: str, *, dialect: str | None = None) -> ParsedQuery:
     }
     aggregates: list[Aggregate] = []
     columns: set[str] = set()
+    dimension_columns: set[str] = set()
     for projection in parsed.expressions:
         alias_node = projection if isinstance(projection, exp.Alias) else None
         inner = projection.this if alias_node is not None else projection
@@ -111,10 +121,12 @@ def parse_primary(sql: str, *, dialect: str | None = None) -> ParsedQuery:
             aggregate = Aggregate(
                 function=aggregate.function,
                 expression=aggregate.expression,
-                alias=(alias or inner.alias).lower(),
+                alias=normalise_alias(alias or inner.alias),
                 fields=aggregate.fields,
             )
             aggregates.append(aggregate)
+        else:
+            dimension_columns |= _columns_in(projection, exp)
         columns |= _columns_in(projection, exp)
 
     where_node = parsed.args.get("where")
@@ -137,6 +149,7 @@ def parse_primary(sql: str, *, dialect: str | None = None) -> ParsedQuery:
         source="primary",
         tables=sort_unique(table_names),
         select_fields=sort_unique(columns),
+        dimension_fields=sort_unique(dimension_columns),
         aggregates=ordered_aggregates,
         filter_expr=filter_expr,
         group_by=group_by,

@@ -169,6 +169,12 @@ def clean_identifier(raw: str) -> str:
 def extract_identifiers(text: str) -> tuple[str, ...]:
     """Extract likely column references from a SQL expression fragment."""
     cleaned = strip_string_literals(strip_comments(text))
+    cleaned = re.sub(
+        r"\bas\s+(?:`[^`]*`|\"[^\"]*\"|\[[^\]]*\]|[A-Za-z_][A-Za-z0-9_]*)\s*$",
+        " ",
+        cleaned,
+        flags=re.I,
+    )
     cleaned = re.sub(r"\bas\s+[A-Za-z_][A-Za-z0-9_]*", " ", cleaned, flags=re.I)
     cleaned = re.sub(r"'(?:''|[^'])*'", " ", cleaned)
     found: set[str] = set()

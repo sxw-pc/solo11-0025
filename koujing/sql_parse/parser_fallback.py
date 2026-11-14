@@ -5,13 +5,26 @@ from __future__ import annotations
 import re
 
 from .common import extract_identifiers, line_range, split_top_level, strip_comments, top_level_words
-from .model import Aggregate, ParsedQuery, canonical_expr, detect_granularity, sort_unique
+from .model import (
+    Aggregate,
+    ParsedQuery,
+    canonical_expr,
+    detect_granularity,
+    duplicate_alias_warnings,
+    normalise_alias,
+    sort_unique,
+)
 
-AGGREGATE_RE = re.compile(
-    r"^(count|sum|avg|max|min)\s*\((.*)\)\s*(?:(?:as\s+)?([A-Za-z_][A-Za-z0-9_]*))?\s*$",
-    re.I | re.S,
+_FUNCTION_RE = re.compile(r"^(count|sum|avg|max|min)\s*\(", re.I | re.S)
+_ALIAS_TOKEN = r"(?:'[^']*'|`[^`]+`|\"[^\"]+\"|\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_]*)"
+_QUALIFIED_COLUMN = r"(?:[A-Za-z_][A-Za-z0-9_]*\s*\.\s*)*[A-Za-z_][A-Za-z0-9_]*"
+_ALIAS_TAIL_RE = re.compile(rf"^(?:as\s+)?({_ALIAS_TOKEN})\s*$", re.I | re.S)
+_IMPLICIT_ALIAS_RE = re.compile(rf"^(.*\))\s+{_ALIAS_TOKEN}\s*$", re.S)
+_IMPLICIT_COLUMN_ALIAS_RE = re.compile(
+    rf"^({_QUALIFIED_COLUMN})\s+{_ALIAS_TOKEN}\s*$", re.I | re.S
 )
 DISTINCT_RE = re.compile(r"^distinct\s+(.*)$", re.I | re.S)
+_SELECT_DISTINCT_RE = re.compile(r"^distinct\s+", re.I)
 TABLE_RE = re.compile(r"\b(?:from|join)\s+([^\s,;]+)", re.I)
 UNSUPPORTED = {"qualify", "window", "emit", "match_recognize", "pivot", "unpivot", "connect"}
 
@@ -57,12 +70,49 @@ def _tables(from_clause: str) -> tuple[str, ...]:
 
 
 def _aggregate_from_item(item: str) -> Aggregate | None:
-    match = AGGREGATE_RE.match(item.strip())
-    if not match:
+    text = item.strip()
+    function_match = _FUNCTION_RE.match(text)
+    if not function_match:
         return None
-    function = match.group(1).lower()
-    argument = match.group(2).strip()
-    alias = (match.group(3) or "").lower()
+    function = function_match.group(1).lower()
+    open_index = function_match.end() - 1
+
+    # Find the parenthesis that closes this aggregate call. Scanning instead of
+    # matching a greedy ".*" prevents a comma-separated item such as
+    # ``SUM(a) AS gmv, SUM(b) AS gmv`` from swallowing its neighbour when this
+    # helper is ever called on a raw fragment.
+    depth = 0
+    close_index = -1
+    quote = ""
+    index = open_index
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                close_index = index
+                break
+        index += 1
+    if close_index < 0:
+        return None
+
+    argument = text[open_index + 1:close_index].strip()
+    alias = ""
+    tail = text[close_index + 1:].strip()
+    if tail:
+        alias_match = _ALIAS_TAIL_RE.match(tail)
+        if not alias_match:
+            return None
+        alias = normalise_alias(alias_match.group(1))
     distinct = DISTINCT_RE.match(argument)
     if function == "count" and distinct:
         function = "count_distinct"
@@ -76,21 +126,32 @@ def _aggregate_from_item(item: str) -> Aggregate | None:
 
 
 def _strip_implicit_alias(item: str) -> str:
-    match = re.match(r"^(.*\))\s+[A-Za-z_][A-Za-z0-9_]*\s*$", item.strip(), re.S)
-    return match.group(1) if match else item
+    text = item.strip()
+    match = _IMPLICIT_ALIAS_RE.match(text)
+    if match:
+        return match.group(1)
+    match = _IMPLICIT_COLUMN_ALIAS_RE.match(text)
+    if match:
+        return match.group(1)
+    return text
 
 
-def _select_parts(select_clause: str) -> tuple[list[Aggregate], tuple[str, ...]]:
+def _select_parts(select_clause: str) -> tuple[list[Aggregate], tuple[str, ...], tuple[str, ...]]:
+    """Split SELECT items into aggregates, dimension fields and their union."""
     aggregates: list[Aggregate] = []
-    fields: list[str] = []
-    for item in split_top_level(select_clause):
+    dimension_fields: list[str] = []
+    # ``SELECT DISTINCT`` qualifies the whole projection list, not the first
+    # aggregate, and sqlglot keeps it outside the first alias too.
+    clause = _SELECT_DISTINCT_RE.sub("", select_clause.strip(), count=1)
+    for item in split_top_level(clause):
         aggregate = _aggregate_from_item(item)
         if aggregate is not None:
             aggregates.append(aggregate)
-            fields.extend(aggregate.fields)
         else:
-            fields.extend(extract_identifiers(_strip_implicit_alias(item)))
-    return aggregates, sort_unique(fields)
+            dimension_fields.extend(extract_identifiers(_strip_implicit_alias(item)))
+    dimension = sort_unique(dimension_fields)
+    aggregate_fields = [field for aggregate in aggregates for field in aggregate.fields]
+    return aggregates, dimension, sort_unique(list(dimension) + aggregate_fields)
 
 
 def _extract_query_text(sql: str) -> dict[str, str]:
@@ -140,6 +201,7 @@ def parse_fallback(sql: str, *, source: str = "fallback",
             source=source,
             tables=(),
             select_fields=(),
+            dimension_fields=(),
             aggregates=(),
             filter_expr="",
             group_by=(),
@@ -160,7 +222,7 @@ def parse_fallback(sql: str, *, source: str = "fallback",
         warnings.append("subquery in FROM is only partially supported")
 
     tables = _tables(sections.get("from", ""))
-    aggregates, select_fields = _select_parts(sections.get("select", ""))
+    aggregates, dimension_fields, select_fields = _select_parts(sections.get("select", ""))
     where_expr = canonical_expr(sections.get("where", ""))
     group_exprs = tuple(
         sorted({canonical_expr(item) for item in split_top_level(sections.get("group", "")) if item})
@@ -175,10 +237,12 @@ def parse_fallback(sql: str, *, source: str = "fallback",
     for aggregate in aggregates:
         if not aggregate.alias:
             warnings.append(f"aggregate {aggregate.function} has no alias; no metric candidate")
+    warnings.extend(duplicate_alias_warnings(aggregates))
     return ParsedQuery(
         source=source,
         tables=tables,
         select_fields=sort_unique(fields),
+        dimension_fields=dimension_fields,
         aggregates=tuple(aggregates),
         filter_expr=where_expr,
         group_by=group_exprs,
