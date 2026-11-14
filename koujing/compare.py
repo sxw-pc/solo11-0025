@@ -42,24 +42,69 @@ def _difference(field: str, expected: Any, actual: Any) -> dict[str, Any]:
     return {"field": field, "expected": expected, "actual": actual}
 
 
+def _lineage_leaves(parsed: ParsedQuery, aggregate) -> tuple[str, ...]:
+    """Physical bottom-level columns reached by one aggregate's lineage."""
+    leaves: set[str] = set()
+    for item in aggregate.lineage:
+        physical = [hop.column for hop in item.chain if hop.kind == "physical"]
+        if physical:
+            leaves.update(physical)
+        else:
+            # Unresolved reference: keep the identifier rather than dropping it.
+            leaves.add(item.column)
+    if not aggregate.lineage:
+        leaves.update(aggregate.fields)
+    return tuple(sorted(leaves))
+
+
+def _field_lineage_leaves(parsed: ParsedQuery) -> set[str]:
+    leaves: set[str] = set()
+    for item in parsed.field_lineage:
+        physical = [hop.column for hop in item.chain if hop.kind == "physical"]
+        leaves.update(physical or [item.column])
+    return leaves
+
+
 def _observed_fields(parsed: ParsedQuery, aggregate) -> tuple[str, ...]:
     # Keep report dimensions and filter/group columns, but attribute aggregate
     # arguments to their own alias so unrelated metrics do not contaminate the
-    # field comparison in multi-metric reports.
-    other_aggregate_fields = {
-        field for other in parsed.aggregates if other is not aggregate for field in other.fields
-    }
-    fields = set(aggregate.fields)
-    fields |= set(parsed.select_fields) - other_aggregate_fields
+    # field comparison in multi-metric reports. All columns are taken from the
+    # resolved lineage: derived-table aliases and CTE output names are traced
+    # back to physical base-table columns before comparison.
+    other_aggregate_leaves = set()
+    for other in parsed.aggregates:
+        if other is not aggregate:
+            other_aggregate_leaves.update(_lineage_leaves(parsed, other))
+    fields = set(_lineage_leaves(parsed, aggregate))
+    fields |= _field_lineage_leaves(parsed) - other_aggregate_leaves
     fields |= set(extract_identifiers(parsed.filter_expr))
     fields |= set(extract_identifiers(" ".join(parsed.group_by)))
     return tuple(sorted(fields))
 
 
+def _lineage_evidence(parsed: ParsedQuery, aggregate) -> dict[str, Any]:
+    return {
+        "source_tables": list(parsed.tables),
+        "aggregates": [
+            {
+                "alias": aggregate.alias,
+                "column": item.column,
+                "physical_tables": list(item.physical_tables),
+                "chain": [hop.to_dict() for hop in item.chain],
+            }
+            for item in aggregate.lineage
+        ],
+        "field_lineage": [item.to_dict() for item in parsed.field_lineage],
+        "relations": [node.to_dict() for node in parsed.relations],
+        "ctes": [node.to_dict() for node in parsed.ctes],
+    }
+
+
 def _evidence(metric: str, parsed: ParsedQuery, observed: dict[str, Any],
               differences: list[dict[str, Any]], alias: str,
-              expected: dict[str, Any] | None) -> dict[str, Any]:
-    return {
+              expected: dict[str, Any] | None,
+              lineage: dict[str, Any] | None = None) -> dict[str, Any]:
+    evidence = {
         "report": "",
         "metric": metric,
         "aggregate_alias": alias,
@@ -70,13 +115,16 @@ def _evidence(metric: str, parsed: ParsedQuery, observed: dict[str, Any],
         "differences": differences,
         "warnings": list(parsed.warnings),
     }
+    if lineage is not None:
+        evidence["lineage"] = lineage
+    return evidence
 
 
 def _finding(report: str, category: str, metric: str, parsed: ParsedQuery,
              summary: str, differences: list[dict[str, Any]],
              observed: dict[str, Any], expected: dict[str, Any] | None,
-             alias: str) -> Finding:
-    evidence = _evidence(metric, parsed, observed, differences, alias, expected)
+             alias: str, lineage: dict[str, Any] | None = None) -> Finding:
+    evidence = _evidence(metric, parsed, observed, differences, alias, expected, lineage)
     evidence["report"] = report
     return Finding(
         report=report,
@@ -99,6 +147,7 @@ def _compare_metric(report: str, parsed: ParsedQuery, aggregate,
     extra = sorted(set(observed_fields) - set(expected_fields))
     observed = {
         "tables": list(parsed.tables),
+        "source_tables": list(parsed.tables),
         "source_fields": list(observed_fields),
         "select_fields": list(parsed.select_fields),
         "aggregation": aggregate.function,
@@ -137,12 +186,14 @@ def _compare_metric(report: str, parsed: ParsedQuery, aggregate,
         category = "consistent"
         summary = "与口径字典一致"
     return _finding(report, category, metric.metric, parsed, summary, differences,
-                    observed, expected, aggregate.alias)
+                    observed, expected, aggregate.alias,
+                    lineage=_lineage_evidence(parsed, aggregate))
 
 
 def _compare_unregistered(report: str, parsed: ParsedQuery, aggregate) -> Finding:
     observed = {
         "tables": list(parsed.tables),
+        "source_tables": list(parsed.tables),
         "select_fields": list(parsed.select_fields),
         "aggregation": aggregate.function,
         "filter_expr": parsed.filter_expr,
@@ -153,7 +204,8 @@ def _compare_unregistered(report: str, parsed: ParsedQuery, aggregate) -> Findin
     differences = [_difference("metric", None, aggregate.alias)]
     return _finding(report, "unregistered", aggregate.alias, parsed,
                     "报表中的聚合别名未在口径字典登记", differences,
-                    observed, None, aggregate.alias)
+                    observed, None, aggregate.alias,
+                    lineage=_lineage_evidence(parsed, aggregate))
 
 
 def compare_report(report: str, parsed: ParsedQuery, dictionary: Dictionary) -> list[Finding]:

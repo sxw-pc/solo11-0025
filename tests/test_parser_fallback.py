@@ -96,3 +96,194 @@ def test_granularity_variants():
     assert month.granularity == "month"
     assert plain.granularity == "row"
     assert none.granularity == "none"
+
+
+# ---------------------------------------------------------------------------
+# CTE / derived-table lineage
+# ---------------------------------------------------------------------------
+
+CTE_SQL = """
+WITH paid AS (
+  SELECT pay_amount, order_paid_at, order_status
+  FROM fact_order
+)
+SELECT DATE(p.order_paid_at) AS order_date,
+       SUM(p.pay_amount) AS order_gmv
+FROM paid p
+WHERE p.order_status = 'paid'
+GROUP BY DATE(p.order_paid_at);
+"""
+
+DERIVED_SQL = """
+SELECT DATE(o.order_paid_at) AS order_date,
+       SUM(o.gmv) AS order_gmv
+FROM (
+  SELECT pay_amount AS gmv, order_paid_at, order_status
+  FROM fact_order
+) o
+WHERE o.order_status = 'paid'
+GROUP BY DATE(o.order_paid_at);
+"""
+
+
+def test_cte_lineage_traces_aggregate_back_to_physical_table():
+    parsed = parse_fallback(CTE_SQL)
+    assert parsed.tables == ("fact_order",)
+    assert [node.alias for node in parsed.ctes] == ["paid"]
+    assert parsed.ctes[0].physical_tables == ("fact_order",)
+    relation = parsed.relations[0]
+    assert relation.kind == "cte"
+    assert relation.alias == "p"
+    assert relation.name == "paid"
+    assert relation.physical_tables == ("fact_order",)
+    lineage = parsed.aggregates[0].lineage[0]
+    assert lineage.physical_tables == ("fact_order",)
+    assert [(hop.table, hop.column, hop.kind) for hop in lineage.chain] == [
+        ("p", "pay_amount", "cte"),
+        ("fact_order", "pay_amount", "physical"),
+    ]
+
+
+def test_cte_scope_is_recorded_in_comparable_contract():
+    parsed = parse_fallback(CTE_SQL)
+    comparable = parsed.comparable()
+    assert comparable["tables"] == ["fact_order"]
+    assert comparable["ctes"][0]["kind"] == "cte"
+    assert comparable["aggregates"][0]["lineage"][0]["chain"][0]["kind"] == "cte"
+
+
+def test_derived_table_lineage_traces_aggregate_back_to_physical_table():
+    parsed = parse_fallback(DERIVED_SQL)
+    # The derived alias `o` must never participate as a source table.
+    assert parsed.tables == ("fact_order",)
+    relation = parsed.relations[0]
+    assert relation.kind == "derived"
+    assert relation.alias == "o"
+    assert relation.physical_tables == ("fact_order",)
+    assert relation.children[0].kind == "table"
+    assert relation.children[0].name == "fact_order"
+    lineage = parsed.aggregates[0].lineage[0]
+    assert lineage.physical_tables == ("fact_order",)
+    assert [(hop.table, hop.column, hop.kind) for hop in lineage.chain] == [
+        ("o", "gmv", "derived"),
+        ("fact_order", "pay_amount", "physical"),
+    ]
+
+
+def test_derived_table_alias_is_not_treated_as_a_source_table():
+    parsed = parse_fallback(DERIVED_SQL)
+    assert "o" not in parsed.tables
+    assert all(node.kind != "table" or node.name != "o" for node in parsed.relations)
+
+
+def test_field_lineage_uses_physical_column_names_through_derived_table():
+    parsed = parse_fallback(DERIVED_SQL)
+    gmv_lineage = next(item for item in parsed.field_lineage if item.column == "gmv")
+    assert gmv_lineage.physical_tables == ("fact_order",)
+    assert [hop.column for hop in gmv_lineage.chain] == ["gmv", "pay_amount"]
+    # The bottom-level column is the physical fact_order column name.
+    assert "pay_amount" in parsed.select_fields
+
+
+def test_nested_derived_tables_build_a_full_chain():
+    sql = """
+    SELECT SUM(x.pay_amount) AS order_gmv FROM (
+      SELECT o.pay_amount FROM (
+        SELECT pay_amount, order_status FROM fact_order
+      ) o
+      WHERE o.order_status = 'paid'
+    ) x;
+    """
+    parsed = parse_fallback(sql)
+    assert parsed.tables == ("fact_order",)
+    lineage = parsed.aggregates[0].lineage[0]
+    assert [(hop.table, hop.kind) for hop in lineage.chain] == [
+        ("x", "derived"),
+        ("o", "derived"),
+        ("fact_order", "physical"),
+    ]
+
+
+def test_derived_alias_shadowing_a_physical_table_name_stays_scoped():
+    sql = """
+    SELECT SUM(fact_order.pay_amount) AS order_gmv
+    FROM (SELECT pay_amount FROM fact_order) fact_order;
+    """
+    parsed = parse_fallback(sql)
+    assert parsed.tables == ("fact_order",)
+    lineage = parsed.aggregates[0].lineage[0]
+    assert lineage.physical_tables == ("fact_order",)
+    assert [(hop.table, hop.kind) for hop in lineage.chain] == [
+        ("fact_order", "derived"),
+        ("fact_order", "physical"),
+    ]
+    assert any("shadows a physical table name" in warning for warning in parsed.warnings)
+
+
+def test_cte_shadowing_a_physical_table_name_stays_scoped():
+    sql = """
+    WITH fact_order AS (SELECT pay_amount FROM fact_order_archive)
+    SELECT SUM(pay_amount) AS order_gmv FROM fact_order;
+    """
+    parsed = parse_fallback(sql)
+    # The CTE name wins inside the statement; its body reads the archive.
+    assert parsed.tables == ("fact_order_archive",)
+    lineage = parsed.aggregates[0].lineage[0]
+    assert lineage.physical_tables == ("fact_order_archive",)
+    assert [(hop.table, hop.kind) for hop in lineage.chain] == [
+        ("fact_order", "cte"),
+        ("fact_order_archive", "physical"),
+    ]
+
+
+def test_recursive_cte_self_reference_terminates_without_looping():
+    sql = """
+    WITH RECURSIVE tree AS (
+      SELECT id, parent_id FROM fact_node WHERE parent_id IS NULL
+      UNION ALL
+      SELECT n.id, n.parent_id
+      FROM fact_node n JOIN tree t ON n.parent_id = t.id
+    )
+    SELECT COUNT(DISTINCT id) AS node_count FROM tree;
+    """
+    parsed = parse_fallback(sql)
+    assert parsed.tables == ("fact_node",)
+    lineage_entries = parsed.aggregates[0].lineage
+    # The anchor branch reaches the physical table.
+    assert any(entry.physical_tables == ("fact_node",) for entry in lineage_entries)
+    # The self-referential branch terminates at an unresolved hop instead of
+    # looping forever.
+    chains = [hop.kind for entry in lineage_entries for hop in entry.chain]
+    assert "unresolved" in chains
+    assert any("recursive CTE" in warning for warning in parsed.warnings)
+
+
+def test_scalar_subquery_sources_are_physical_tables():
+    sql = """
+    SELECT SUM(pay_amount) AS order_gmv
+    FROM fact_order
+    WHERE user_id IN (SELECT user_id FROM dim_account WHERE status = 'ok');
+    """
+    parsed = parse_fallback(sql)
+    assert parsed.tables == ("dim_account", "fact_order")
+    lineage = parsed.aggregates[0].lineage[0]
+    assert lineage.physical_tables == ("fact_order",)
+    nested = next(rel for rel in parsed.relations if rel.kind == "derived")
+    assert nested.physical_tables == ("dim_account",)
+
+
+def test_join_derived_table_resolves_qualified_reference():
+    sql = """
+    SELECT COUNT(DISTINCT o.user_id) AS active_user
+    FROM fact_login l
+    JOIN (SELECT user_id FROM dim_account) o ON o.user_id = l.user_id
+    WHERE l.event_type = 'login';
+    """
+    parsed = parse_fallback(sql)
+    assert parsed.tables == ("dim_account", "fact_login")
+    lineage = parsed.aggregates[0].lineage[0]
+    assert lineage.physical_tables == ("dim_account",)
+    assert [(hop.table, hop.kind) for hop in lineage.chain] == [
+        ("o", "derived"),
+        ("dim_account", "physical"),
+    ]

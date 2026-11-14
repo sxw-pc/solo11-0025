@@ -26,7 +26,7 @@ def test_default_check_writes_reports_and_returns_zero(tmp_path, capsys):
     exit_code = main(check_args(tmp_path))
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert "drift=1" in captured.out
+    assert "drift=2" in captured.out
     assert "missing_field=1" in captured.out
     batches = out_batches(tmp_path)
     assert len(batches) == 1
@@ -78,7 +78,7 @@ def test_history_and_export_roundtrip(tmp_path, capsys):
     assert main(["history", "--db", str(tmp_path / "koujing.db")]) == 0
     history = capsys.readouterr().out
     assert batch_id in history
-    assert "drift=1" in history
+    assert "drift=2" in history
     export_out = tmp_path / "exported"
     assert main([
         "export", batch_id, "--db", str(tmp_path / "koujing.db"),

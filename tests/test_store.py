@@ -15,8 +15,8 @@ def build_batch(batch_id="20260101T000000000000Z-abcdef12"):
         "batch_id": batch_id,
         "created_at": "2026-01-01T00:00:00Z",
         "dict_fingerprint": "abcdef12" + "0" * 56,
-        "report_count": 6,
-        "counts": {"consistent": 3, "drift": 1, "missing_field": 1, "unregistered": 1},
+        "report_count": 9,
+        "counts": {"consistent": 5, "drift": 2, "missing_field": 1, "unregistered": 1},
         "parser_mode": "fallback",
     }
 
@@ -39,7 +39,7 @@ def test_schema_is_idempotent_and_batch_roundtrips(dictionary, tmp_path):
     assert loaded["counts"] == batch["counts"]
     assert loaded["parser_mode"] == "fallback"
     findings = store.get_findings(batch["batch_id"])
-    assert len(findings) == 6
+    assert len(findings) == 9
     assert findings[0]["line_range"] == [findings[0]["line_start"], findings[0]["line_end"]]
     assert findings[0]["evidence"]["report"] == findings[0]["report"]
 
@@ -51,7 +51,7 @@ def test_duplicate_batch_write_is_idempotent(dictionary, tmp_path):
     assert store.save_batch(batch, findings, "raw") is True
     assert store.save_batch(batch, findings, "raw") is False
     assert store.save_batch(batch, findings[:1], "different") is False
-    assert len(store.get_findings(batch["batch_id"])) == 6
+    assert len(store.get_findings(batch["batch_id"])) == 9
     assert store.count_batches() == 1
     assert store.get_dict_snapshot(batch["dict_fingerprint"])["content"] == "raw"
 
@@ -66,7 +66,7 @@ def test_batch_listing_category_and_metric_queries(dictionary, tmp_path):
     assert [item["batch_id"] for item in store.list_batches()] == [
         second["batch_id"], first["batch_id"]
     ]
-    assert store.category_counts(first["batch_id"])["drift"] == 1
+    assert store.category_counts(first["batch_id"])["drift"] == 2
     assert len(store.findings_by_category(first["batch_id"], "unregistered")) == 1
     history = store.metric_history("active_user")
     assert len(history) == 6
@@ -78,7 +78,7 @@ def test_in_memory_store_supports_roundtrip(dictionary):
     batch = build_batch()
     store.save_batch(batch, build_findings(dictionary), "raw")
     assert store.get_batch(batch["batch_id"])["batch_id"] == batch["batch_id"]
-    assert len(store.get_findings(batch["batch_id"])) == 6
+    assert len(store.get_findings(batch["batch_id"])) == 9
 
 
 def test_dictionary_snapshot_is_preserved(dictionary, tmp_path):

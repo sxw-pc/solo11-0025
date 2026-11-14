@@ -68,7 +68,7 @@ def test_batch_list_and_grouped_detail(viewer):
     status, body, _ = request(port, f"/api/batches/{batch_id}")
     assert status == 200
     payload = json.loads(body)
-    assert payload["summary"]["drift"] == 1
+    assert payload["summary"]["drift"] == 2
     assert set(payload["groups"]) == {"consistent", "drift", "missing_field", "unregistered"}
     assert all(item["report"].startswith("fixtures/reports/") for item in payload["findings"])
     assert str(ROOT) not in body.decode("utf-8")
@@ -85,7 +85,7 @@ def test_finding_evidence_and_json_download(viewer):
     assert "attachment" in headers["Content-Disposition"]
     report = json.loads(body)
     assert report["batch"]["batch_id"] == batch_id
-    assert len(report["findings"]) == 6
+    assert len(report["findings"]) == 9
 
 
 def test_out_of_range_finding_is_404(viewer):

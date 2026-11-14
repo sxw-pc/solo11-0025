@@ -29,8 +29,8 @@ def batch_dict():
         "batch_id": "20260101T000000000000Z-abcdef12",
         "created_at": "2026-01-01T00:00:00Z",
         "dict_fingerprint": "a" * 64,
-        "report_count": 6,
-        "counts": {"consistent": 3, "drift": 1, "missing_field": 1, "unregistered": 1},
+        "report_count": 9,
+        "counts": {"consistent": 5, "drift": 2, "missing_field": 1, "unregistered": 1},
         "parser_mode": "fallback",
     }
 
@@ -39,9 +39,9 @@ def test_payload_has_summary_and_machine_evidence(dictionary):
     payload = build_payload(batch_dict(), make_findings(dictionary))
     assert payload["schema_version"] == 1
     assert payload["summary"] == {
-        "consistent": 3, "drift": 1, "missing_field": 1, "unregistered": 1
+        "consistent": 5, "drift": 2, "missing_field": 1, "unregistered": 1
     }
-    assert len(payload["findings"]) == 6
+    assert len(payload["findings"]) == 9
     for finding in payload["findings"]:
         assert finding["report"].startswith("fixtures/reports/")
         assert finding["line_range"] == [finding["line_start"], finding["line_end"]]
