@@ -10,7 +10,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from .config import CATEGORIES, DEFAULT_DB, DEFAULT_HOST, DEFAULT_PORT, SERVER_NAME, STATIC_DIR, safe_batch_component
+from .config import (
+    CATEGORIES, DEFAULT_DB, DEFAULT_HOST, DEFAULT_PORT, SERVER_NAME, STATIC_DIR,
+    safe_batch_component,
+)
 from .report import render_json
 from .store import Store
 
@@ -148,8 +151,13 @@ class KoujingRequestHandler(BaseHTTPRequestHandler):
         if len(parts) == 3:
             groups = {name: [item for item in findings if item["category"] == name]
                       for name in CATEGORIES}
+            extra_groups = {
+                name: [item for item in findings if item["category"] == name]
+                for name in (batch.get("extra_counts") or {})
+            }
             self._send_json(HTTPStatus.OK, {
-                "batch": batch, "summary": batch["counts"], "groups": groups, "findings": findings,
+                "batch": batch, "summary": batch["counts"], "groups": groups,
+                "extra_groups": extra_groups, "findings": findings,
             }, head_only=head_only)
             return
         if len(parts) == 4 and parts[3] == "report.json":

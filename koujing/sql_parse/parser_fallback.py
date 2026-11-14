@@ -6,6 +6,7 @@ import re
 
 from .common import extract_identifiers, line_range, split_top_level, strip_comments, top_level_words
 from .model import Aggregate, ParsedQuery, canonical_expr, detect_granularity, sort_unique
+from .ratio import RATIO_FUNCTION, parse_ratio_expression, ratio_fields, split_projection_alias
 
 AGGREGATE_RE = re.compile(
     r"^(count|sum|avg|max|min)\s*\((.*)\)\s*(?:(?:as\s+)?([A-Za-z_][A-Za-z0-9_]*))?\s*$",
@@ -56,6 +57,25 @@ def _tables(from_clause: str) -> tuple[str, ...]:
     return sort_unique(found)
 
 
+def _balanced(text: str) -> bool:
+    depth = 0
+    quote = ""
+    for char in text:
+        if quote:
+            if char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
 def _aggregate_from_item(item: str) -> Aggregate | None:
     match = AGGREGATE_RE.match(item.strip())
     if not match:
@@ -63,6 +83,15 @@ def _aggregate_from_item(item: str) -> Aggregate | None:
     function = match.group(1).lower()
     argument = match.group(2).strip()
     alias = (match.group(3) or "").lower()
+    if not _balanced(argument):
+        # The greedy ``(.*)`` regex swallowed ``SUM(x) / SUM(y)`` as if the
+        # outer ``SUM`` covered everything. Leave it to the ratio extractor.
+        return None
+    if function == "avg" and _has_top_level_division(argument):
+        # ``AVG(x / y)`` is an average ratio. Let ``_ratio_from_item`` see the
+        # whole projection so the composite structure is preserved instead of
+        # collapsing it into a legacy single-AVG aggregate.
+        return None
     distinct = DISTINCT_RE.match(argument)
     if function == "count" and distinct:
         function = "count_distinct"
@@ -72,6 +101,42 @@ def _aggregate_from_item(item: str) -> Aggregate | None:
         expression=canonical_expr(argument),
         alias=alias,
         fields=extract_identifiers(argument),
+    )
+
+
+def _has_top_level_division(text: str) -> bool:
+    depth = 0
+    quote = ""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in {"'", '"', "`"}:
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif char == "/" and depth == 0:
+            return True
+        index += 1
+    return False
+
+
+def _ratio_from_item(item: str) -> Aggregate | None:
+    """Catch ratio projections whose outer form is not a bare aggregate."""
+    core, alias = split_projection_alias(item)
+    ratio = parse_ratio_expression(core)
+    if ratio is None:
+        return None
+    return Aggregate(
+        function=RATIO_FUNCTION,
+        expression=canonical_expr(core),
+        alias=alias,
+        fields=ratio_fields(ratio),
+        ratio=ratio,
     )
 
 
@@ -85,6 +150,8 @@ def _select_parts(select_clause: str) -> tuple[list[Aggregate], tuple[str, ...]]
     fields: list[str] = []
     for item in split_top_level(select_clause):
         aggregate = _aggregate_from_item(item)
+        if aggregate is None:
+            aggregate = _ratio_from_item(item)
         if aggregate is not None:
             aggregates.append(aggregate)
             fields.extend(aggregate.fields)

@@ -7,6 +7,24 @@ const CATEGORIES = [
   { key: "unregistered", label: "未登记", color: "#a1323d", hint: "报表聚合别名不在口径字典中" }
 ];
 
+// Additive categories only appear when the batch actually contains them, so a
+// legacy four-category batch renders exactly as before.
+const EXTRA_CATEGORIES = {
+  undetermined: {
+    key: "undetermined", label: "无法判定", color: "#4b5b8c",
+    hint: "派生比率超出可解析子集，不能给出结论"
+  }
+};
+
+function categoriesFor(detail) {
+  const extra = (detail && detail.batch && detail.batch.extra_counts) || {};
+  return CATEGORIES.concat(
+    Object.keys(EXTRA_CATEGORIES)
+      .filter((key) => key in extra)
+      .map((key) => EXTRA_CATEGORIES[key])
+  );
+}
+
 const state = { batches: [], selected: "", detail: null };
 
 const byId = (id) => document.getElementById(id);
@@ -51,9 +69,13 @@ function renderBatches() {
     if (batch.batch_id === state.selected) button.classList.add("active");
     const title = make("span", "", batch.batch_id);
     const counts = batch.counts || {};
+    const extra = batch.extra_counts || {};
+    const extraText = Object.keys(extra).length
+      ? ` · 无法判定 ${extra.undetermined || 0}`
+      : "";
     const meta = make(
       "small", "",
-      `${batch.created_at} · ${batch.report_count} 份报表 · 偏差 ${counts.drift || 0}`
+      `${batch.created_at} · ${batch.report_count} 份报表 · 偏差 ${counts.drift || 0}${extraText}`
     );
     button.append(title, meta);
     button.addEventListener("click", () => selectBatch(batch.batch_id));
@@ -82,10 +104,12 @@ function summaryStats(detail) {
   const container = byId("summary");
   container.replaceChildren();
   const counts = detail.summary || {};
-  for (const category of CATEGORIES) {
+  const extra = (detail.batch && detail.batch.extra_counts) || {};
+  for (const category of categoriesFor(detail)) {
     const card = make("div", "stat");
     card.style.setProperty("--stat", category.color);
-    const count = make("strong", "", counts[category.key] || 0);
+    const value = category.key in extra ? extra[category.key] : counts[category.key];
+    const count = make("strong", "", value || 0);
     count.style.color = category.color;
     card.append(count, make("span", "", category.label));
     card.title = category.hint;
@@ -115,7 +139,7 @@ function renderGroups(detail) {
   const container = byId("groups");
   container.replaceChildren();
   const findings = detail.findings || [];
-  for (const category of CATEGORIES) {
+  for (const category of categoriesFor(detail)) {
     const group = make("section", "group");
     group.dataset.category = category.key;
     const head = make("div", "group-head");

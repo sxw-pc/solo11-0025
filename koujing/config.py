@@ -21,20 +21,67 @@ DEFAULT_PORT = 8765
 SERVER_NAME = "koujing/1.0"
 
 CATEGORIES = ("consistent", "drift", "missing_field", "unregistered")
+# ``undetermined`` is reserved for derived ratio metrics whose denominator (or
+# numerator) falls outside the statically parseable subset. It is deliberately
+# kept out of ``CATEGORIES`` so the legacy four-category summary stays exactly
+# the same when no ratio metric is involved.
+EXTRA_CATEGORIES = ("undetermined",)
+ALL_CATEGORIES = CATEGORIES + EXTRA_CATEGORIES
 CATEGORY_LABELS = {
     "consistent": "一致",
     "drift": "偏差",
     "missing_field": "缺失字段",
     "unregistered": "未登记",
+    "undetermined": "无法判定",
 }
-CATEGORY_ORDER = {name: index for index, name in enumerate(CATEGORIES)}
-FAILABLE_CATEGORIES = ("drift", "missing_field", "unregistered")
+CATEGORY_ORDER = {
+    name: index for index, name in enumerate(ALL_CATEGORIES)
+}
+FAILABLE_CATEGORIES = ("drift", "missing_field", "unregistered", "undetermined")
 
 AGGREGATIONS = ("sum", "count", "count_distinct", "avg", "max", "min")
 AGGREGATION_ALIASES = {
     "count(distinct)": "count_distinct",
     "count_distinct": "count_distinct",
     "distinct_count": "count_distinct",
+}
+
+# Derived ratio metrics. A ratio metric keeps the legacy ``aggregation`` slot
+# occupied by the ``ratio`` sentinel so old single-aggregate metrics keep their
+# original shape and fingerprint.
+RATIO_AGGREGATION = "ratio"
+RATIO_AGGREGATION_ALIASES = {"ratio", "divide", "div", "ratio_metric"}
+
+RATIO_KINDS = ("population_ratio", "average_ratio")
+RATIO_KIND_ALIASES = {
+    "population": "population_ratio",
+    "population_ratio": "population_ratio",
+    "ratio": "population_ratio",
+    "ratio_of_sums": "population_ratio",
+    "sum_ratio": "population_ratio",
+    "average": "average_ratio",
+    "avg": "average_ratio",
+    "average_ratio": "average_ratio",
+    "ratio_of_averages": "average_ratio",
+    "mean_ratio": "average_ratio",
+}
+
+ZERO_DIVISION_POLICIES = ("nullif", "coalesce_zero", "unprotected")
+ZERO_DIVISION_ALIASES = {
+    "nullif": "nullif",
+    "nullif_zero": "nullif",
+    "null_on_zero": "nullif",
+    "return_null": "nullif",
+    "safe_divide": "nullif",
+    "coalesce": "coalesce_zero",
+    "coalesce_zero": "coalesce_zero",
+    "ifnull": "coalesce_zero",
+    "zero": "coalesce_zero",
+    "zero_fill": "coalesce_zero",
+    "none": "unprotected",
+    "unprotected": "unprotected",
+    "error": "unprotected",
+    "raise": "unprotected",
 }
 
 METRIC_REQUIRED = (

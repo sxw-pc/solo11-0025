@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from .compare import Finding
-from .config import CATEGORIES, canonical_json, safe_batch_component
+from .config import ALL_CATEGORIES, CATEGORIES, canonical_json, safe_batch_component
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS batch (
@@ -124,7 +124,10 @@ class Store:
         payload = [item.to_dict() if isinstance(item, Finding) else dict(item)
                    for item in findings]
         counts = batch.get("counts") or {}
+        extra_counts = batch.get("extra_counts") or {}
         normalised_counts = {name: int(counts.get(name, 0)) for name in CATEGORIES}
+        normalised_counts.update({name: int(extra_counts.get(name, 0))
+                                  for name in ALL_CATEGORIES if name not in CATEGORIES})
         with self.connection() as connection:
             try:
                 with connection:
@@ -186,12 +189,16 @@ class Store:
             return None
         counts = {name: 0 for name in CATEGORIES}
         counts.update(json.loads(row["counts_json"]))
+        extra_counts = {name: counts.pop(name, 0) for name in ALL_CATEGORIES
+                        if name not in CATEGORIES}
+        extra_counts = {name: value for name, value in extra_counts.items() if value}
         return {
             "batch_id": row["batch_id"],
             "created_at": row["created_at"],
             "dict_fingerprint": row["dict_fingerprint"],
             "report_count": row["report_count"],
             "counts": counts,
+            "extra_counts": extra_counts,
             "parser_mode": row["parser_mode"],
         }
 
@@ -231,7 +238,7 @@ class Store:
         return [item for item in self.get_findings(batch_id) if item["category"] == category]
 
     def category_counts(self, batch_id: str) -> dict[str, int]:
-        counts = {name: 0 for name in CATEGORIES}
+        counts = {name: 0 for name in ALL_CATEGORIES}
         with self.connection() as connection:
             rows = connection.execute(
                 "SELECT category, COUNT(*) AS amount FROM finding "

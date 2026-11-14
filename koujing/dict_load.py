@@ -9,7 +9,19 @@ from pathlib import Path
 from typing import Any
 
 from . import yaml_lite
-from .config import AGGREGATIONS, AGGREGATION_ALIASES, METRIC_REQUIRED, canonical_json, sha256_text
+from .config import (
+    AGGREGATIONS,
+    AGGREGATION_ALIASES,
+    METRIC_REQUIRED,
+    RATIO_AGGREGATION,
+    RATIO_AGGREGATION_ALIASES,
+    RATIO_KIND_ALIASES,
+    RATIO_KINDS,
+    ZERO_DIVISION_ALIASES,
+    ZERO_DIVISION_POLICIES,
+    canonical_json,
+    sha256_text,
+)
 from .sql_parse.model import canonical_expr, sort_unique
 
 
@@ -19,6 +31,39 @@ class DictValidationError(ValueError):
     def __init__(self, errors: list[dict[str, Any]]):
         super().__init__(f"{len(errors)} dictionary error(s)")
         self.errors = errors
+
+
+@dataclass(frozen=True)
+class RatioOperand:
+    """Declared numerator or denominator of a derived ratio metric."""
+
+    aggregation: str
+    field: str
+
+    @property
+    def expression(self) -> str:
+        return canonical_expr(self.field)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"aggregation": self.aggregation, "field": self.field}
+
+
+@dataclass(frozen=True)
+class MetricRatio:
+    """Declared ratio contract: numerator, denominator and zero policy."""
+
+    kind: str
+    numerator: RatioOperand
+    denominator: RatioOperand
+    zero_division: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "numerator": self.numerator.to_dict(),
+            "denominator": self.denominator.to_dict(),
+            "zero_division": self.zero_division,
+        }
 
 
 @dataclass(frozen=True)
@@ -32,9 +77,14 @@ class Metric:
     filter_expr: str
     granularity: str
     version: str
+    ratio: MetricRatio | None = None
+
+    @property
+    def is_ratio(self) -> bool:
+        return self.ratio is not None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "metric": self.metric,
             "owner": self.owner,
             "description": self.description,
@@ -45,6 +95,11 @@ class Metric:
             "granularity": self.granularity,
             "version": self.version,
         }
+        # Keep the legacy payload byte-identical for single-aggregate metrics so
+        # their dictionary fingerprint does not change when ratio support lands.
+        if self.ratio is not None:
+            data["ratio"] = self.ratio.to_dict()
+        return data
 
 
 @dataclass(frozen=True)
@@ -122,6 +177,87 @@ def _as_list(value: Any, *, field: str, index: int, metric: str,
     return sort_unique(cleaned)
 
 
+def _normalise_ratio_operand(value: Any, *, side: str, index: int, metric: str,
+                             errors: list[dict[str, Any]]) -> RatioOperand | None:
+    """Validate one declared ratio operand: ``{aggregation, field}``."""
+    field_name = f"ratio.{side}"
+    if not isinstance(value, dict):
+        errors.append(_error("invalid_ratio_operand",
+                             f"ratio.{side} must be a mapping with aggregation and field",
+                             index=index, metric=metric, field=field_name))
+        return None
+    aggregation_raw = str(value.get("aggregation", "")).strip().lower()
+    aggregation = AGGREGATION_ALIASES.get(aggregation_raw, aggregation_raw)
+    if not aggregation_raw:
+        errors.append(_error("missing_field", f"ratio.{side}.aggregation is required",
+                             index=index, metric=metric, field=f"{field_name}.aggregation"))
+    elif aggregation not in AGGREGATIONS:
+        errors.append(_error("invalid_aggregation",
+                             f"unsupported aggregation: {aggregation_raw!r}",
+                             index=index, metric=metric, field=f"{field_name}.aggregation"))
+    field_raw = value.get("field")
+    operand_field = str(field_raw).strip() if field_raw is not None else ""
+    if not operand_field:
+        errors.append(_error("missing_field", f"ratio.{side}.field is required",
+                             index=index, metric=metric, field=f"{field_name}.field"))
+    return RatioOperand(aggregation=aggregation, field=canonical_expr(operand_field))
+
+
+def _normalise_ratio(value: Any, *, index: int, metric: str, aggregation: str,
+                     errors: list[dict[str, Any]]) -> MetricRatio | None:
+    if not isinstance(value, dict):
+        errors.append(_error("invalid_ratio", "ratio must be a mapping",
+                             index=index, metric=metric, field="ratio"))
+        return None
+
+    kind_raw = str(value.get("kind", "")).strip().lower()
+    if kind_raw:
+        kind = RATIO_KIND_ALIASES.get(kind_raw, kind_raw)
+        if kind not in RATIO_KINDS:
+            errors.append(_error("invalid_ratio_kind",
+                                 f"unsupported ratio kind: {kind_raw!r}",
+                                 index=index, metric=metric, field="ratio.kind"))
+    else:
+        legacy = AGGREGATION_ALIASES.get(aggregation, aggregation)
+        kind = "average_ratio" if legacy == "avg" else "population_ratio"
+
+    zero_raw = str(value.get("zero_division", "")).strip().lower()
+    zero_division = "nullif"
+    if zero_raw:
+        zero_division = ZERO_DIVISION_ALIASES.get(zero_raw, zero_raw)
+        if zero_division not in ZERO_DIVISION_POLICIES:
+            errors.append(_error("invalid_zero_division",
+                                 f"unsupported zero_division policy: {zero_raw!r}",
+                                 index=index, metric=metric, field="ratio.zero_division"))
+
+    numerator = _normalise_ratio_operand(value.get("numerator"), side="numerator",
+                                         index=index, metric=metric, errors=errors)
+    denominator = _normalise_ratio_operand(value.get("denominator"), side="denominator",
+                                           index=index, metric=metric, errors=errors)
+    if numerator is None or denominator is None:
+        return None
+
+    if kind == "average_ratio":
+        # Per-row ratio: the two operands are fields, not aggregates.
+        for side, operand in (("numerator", numerator), ("denominator", denominator)):
+            if operand.aggregation != "avg":
+                errors.append(_error(
+                    "invalid_ratio_operand",
+                    f"average_ratio expects ratio.{side}.aggregation='avg' (row-level operand)",
+                    index=index, metric=metric, field=f"ratio.{side}.aggregation",
+                ))
+    for side, operand in (("numerator", numerator), ("denominator", denominator)):
+        if operand.aggregation in {"max", "min"}:
+            errors.append(_error(
+                "unsupported_ratio_aggregation",
+                f"ratio.{side}.aggregation={operand.aggregation!r} is not supported "
+                "for ratio operands",
+                index=index, metric=metric, field=f"ratio.{side}.aggregation",
+            ))
+    return MetricRatio(kind=kind, numerator=numerator, denominator=denominator,
+                       zero_division=zero_division)
+
+
 def _normalise_metric(raw: Any, index: int, errors: list[dict[str, Any]]) -> Metric | None:
     if not isinstance(raw, dict):
         errors.append(_error("invalid_metric", "each metric must be a mapping", index=index))
@@ -154,10 +290,24 @@ def _normalise_metric(raw: Any, index: int, errors: list[dict[str, Any]]) -> Met
 
     aggregation_raw = str(raw.get("aggregation", "")).strip().lower()
     aggregation = AGGREGATION_ALIASES.get(aggregation_raw, aggregation_raw)
-    if aggregation_raw and aggregation not in AGGREGATIONS:
+    ratio_raw = raw.get("ratio")
+    ratio: MetricRatio | None = None
+    declared_ratio = ratio_raw not in (None, "") or aggregation_raw in RATIO_AGGREGATION_ALIASES
+    if aggregation_raw in RATIO_AGGREGATION_ALIASES:
+        aggregation = RATIO_AGGREGATION
+    elif aggregation_raw and aggregation not in AGGREGATIONS:
         errors.append(_error("invalid_aggregation",
                              f"unsupported aggregation: {aggregation_raw!r}",
                              index=index, metric=name, field="aggregation"))
+    if declared_ratio and ratio_raw in (None, ""):
+        errors.append(_error("missing_field", "ratio is required when aggregation='ratio'",
+                             index=index, metric=name, field="ratio"))
+    elif declared_ratio:
+        ratio = _normalise_ratio(ratio_raw, index=index, metric=name,
+                                 aggregation=aggregation, errors=errors)
+    if ratio is not None:
+        aggregation = RATIO_AGGREGATION
+
     owner = str(raw.get("owner", "")).strip()
     description = str(raw.get("description", "")).strip()
     filter_expr = canonical_expr(raw.get("filter_expr"))
@@ -173,6 +323,7 @@ def _normalise_metric(raw: Any, index: int, errors: list[dict[str, Any]]) -> Met
         filter_expr=filter_expr,
         granularity=granularity,
         version=version,
+        ratio=ratio,
     )
 
 

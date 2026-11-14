@@ -7,6 +7,72 @@ from dataclasses import asdict, dataclass, field
 
 
 @dataclass(frozen=True)
+class RatioPart:
+    """One side of a derived ratio.
+
+    ``aggregation`` is empty when the operand could not be reduced to a
+    supported aggregate/row expression. An unsupported part is kept verbatim
+    in ``expression`` so the comparison layer can report ``undetermined``
+    instead of silently dropping the derived alias.
+    """
+
+    aggregation: str
+    expression: str
+    fields: tuple[str, ...] = field(default_factory=tuple)
+
+    @property
+    def supported(self) -> bool:
+        return self.aggregation in SUPPORTED_PART_AGGREGATIONS
+
+    def to_dict(self) -> dict:
+        return {
+            "aggregation": self.aggregation,
+            "expression": self.expression,
+            "fields": list(self.fields),
+            "supported": self.supported,
+        }
+
+
+SUPPORTED_PART_AGGREGATIONS = frozenset({
+    "sum", "count", "count_distinct", "avg", "max", "min", "row",
+})
+
+
+@dataclass(frozen=True)
+class RatioSpec:
+    """Parser-neutral composite structure for a derived ratio projection.
+
+    ``population_ratio`` covers ``SUM(x) / SUM(y)`` style ratios: numerator
+    and denominator are aggregates applied independently. ``average_ratio``
+    covers ``AVG(x / y)``: the ratio is formed per row and then averaged, which
+    is deliberately a different kind from ``AVG(x) / AVG(y)``.
+    """
+
+    kind: str
+    numerator: RatioPart
+    denominator: RatioPart
+    zero_division: str
+    expression: str
+    unsupported: tuple[str, ...] = field(default_factory=tuple)
+
+    @property
+    def supported(self) -> bool:
+        return (not self.unsupported
+                and self.numerator.supported
+                and self.denominator.supported)
+
+    def to_dict(self) -> dict:
+        return {
+            "kind": self.kind,
+            "numerator": self.numerator.to_dict(),
+            "denominator": self.denominator.to_dict(),
+            "zero_division": self.zero_division,
+            "expression": self.expression,
+            "undetermined": list(self.unsupported),
+        }
+
+
+@dataclass(frozen=True)
 class Aggregate:
     """One aggregate projection such as ``SUM(pay_amount) AS order_gmv``."""
 
@@ -14,6 +80,7 @@ class Aggregate:
     expression: str
     alias: str
     fields: tuple[str, ...] = field(default_factory=tuple)
+    ratio: RatioSpec | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -21,6 +88,7 @@ class Aggregate:
             "expression": self.expression,
             "alias": self.alias,
             "fields": list(self.fields),
+            "ratio": self.ratio.to_dict() if self.ratio is not None else None,
         }
 
 

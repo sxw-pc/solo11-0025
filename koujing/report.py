@@ -8,7 +8,15 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .compare import Finding
-from .config import CATEGORIES, CATEGORY_LABELS, CATEGORY_ORDER, relative_display, safe_batch_component
+from .config import (
+    ALL_CATEGORIES,
+    CATEGORIES,
+    CATEGORY_LABELS,
+    CATEGORY_ORDER,
+    EXTRA_CATEGORIES,
+    relative_display,
+    safe_batch_component,
+)
 
 
 def _as_dict(finding: Finding | dict[str, Any]) -> dict[str, Any]:
@@ -41,9 +49,13 @@ def normalise_findings(findings: Iterable[Finding | dict[str, Any]]) -> list[dic
 def build_payload(batch: dict[str, Any], findings: Iterable[Finding | dict[str, Any]]) -> dict[str, Any]:
     items = normalise_findings(findings)
     counts = {name: 0 for name in CATEGORIES}
+    extra_counts: dict[str, int] = {}
     for item in items:
         category = item.get("category", "")
-        counts[category] = counts.get(category, 0) + 1
+        if category in counts:
+            counts[category] += 1
+        elif category:
+            extra_counts[category] = extra_counts.get(category, 0) + 1
     batch_payload = {
         "batch_id": batch["batch_id"],
         "created_at": batch["created_at"],
@@ -52,13 +64,20 @@ def build_payload(batch: dict[str, Any], findings: Iterable[Finding | dict[str, 
         "parser_mode": batch.get("parser_mode", "auto"),
         "counts": counts,
     }
-    return {
+    # ``summary`` keeps exactly the legacy four keys so existing consumers and
+    # fixtures do not change; ratio-only ``undetermined`` findings live in a
+    # separate, explicitly additive key.
+    payload = {
         "schema_version": 1,
         "generator": "koujing",
         "batch": batch_payload,
         "summary": counts,
         "findings": items,
     }
+    if extra_counts:
+        payload["extra_summary"] = extra_counts
+        payload["categories"] = list(ALL_CATEGORIES)
+    return payload
 
 
 def render_json(batch: dict[str, Any], findings: Iterable[Finding | dict[str, Any]]) -> str:
@@ -82,6 +101,13 @@ def _difference_lines(item: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _groups_to_render(payload: dict[str, Any]) -> tuple[str, ...]:
+    """Legacy four groups always; additive groups only when they occurred."""
+    if not payload.get("extra_summary"):
+        return CATEGORIES
+    return ALL_CATEGORIES
+
+
 def render_markdown(batch: dict[str, Any], findings: Iterable[Finding | dict[str, Any]]) -> str:
     payload = build_payload(batch, findings)
     batch_data = payload["batch"]
@@ -99,9 +125,14 @@ def render_markdown(batch: dict[str, Any], findings: Iterable[Finding | dict[str
         "| 类别 | 含义 | 数量 |",
         "| --- | --- | ---: |",
     ]
+    groups = _groups_to_render(payload)
     for category in CATEGORIES:
         lines.append(f"| `{category}` | {CATEGORY_LABELS[category]} | {payload['summary'][category]} |")
-    for category in CATEGORIES:
+    for category in EXTRA_CATEGORIES:
+        if category in groups:
+            count = payload["extra_summary"][category]
+            lines.append(f"| `{category}` | {CATEGORY_LABELS[category]} | {count} |")
+    for category in groups:
         group = [item for item in payload["findings"] if item.get("category") == category]
         lines.extend(["", f"## {CATEGORY_LABELS[category]} (`{category}`) — {len(group)}", ""])
         if not group:
@@ -159,7 +190,7 @@ def render_html(batch: dict[str, Any], findings: Iterable[Finding | dict[str, An
     batch_data = payload["batch"]
     sections: list[str] = []
     toc: list[str] = []
-    for category in CATEGORIES:
+    for category in _groups_to_render(payload):
         group = [item for item in payload["findings"] if item.get("category") == category]
         anchor = f"group-{category}"
         toc.append(

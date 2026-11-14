@@ -11,6 +11,7 @@ from .common import (
     top_level_words,
 )
 from .model import Aggregate, ParsedQuery, canonical_expr, detect_granularity, sort_unique
+from .ratio import RATIO_FUNCTION, parse_ratio_expression, ratio_fields
 
 
 class PrimaryParserUnavailable(RuntimeError):
@@ -40,6 +41,9 @@ def _aggregate_of(inner, exp) -> Aggregate | None:
     if function is None:
         return None
     argument_node = inner.this if inner.this is not None else None
+    if function == "avg" and isinstance(argument_node, exp.Div):
+        # ``AVG(x / y)`` is a per-row average ratio, not a single AVG metric.
+        return None
     if type(argument_node).__name__ == "Distinct":
         function = "count_distinct" if function == "count" else function
         expressions = argument_node.expressions
@@ -50,6 +54,23 @@ def _aggregate_of(inner, exp) -> Aggregate | None:
         expression=canonical_expr(argument),
         alias="",
         fields=extract_identifiers(argument),
+    )
+
+
+def _ratio_aggregate(inner, exp) -> Aggregate | None:
+    """Wrap a projection that is a derived ratio rather than a lone aggregate."""
+    if not isinstance(inner, (exp.Div, exp.Avg, exp.Coalesce, exp.Nullif,
+                              exp.Round, exp.Cast, exp.TryCast)):
+        return None
+    ratio = parse_ratio_expression(inner.sql())
+    if ratio is None:
+        return None
+    return Aggregate(
+        function=RATIO_FUNCTION,
+        expression=canonical_expr(inner.sql()),
+        alias="",
+        fields=ratio_fields(ratio),
+        ratio=ratio,
     )
 
 
@@ -106,6 +127,8 @@ def parse_primary(sql: str, *, dialect: str | None = None) -> ParsedQuery:
         alias_node = projection if isinstance(projection, exp.Alias) else None
         inner = projection.this if alias_node is not None else projection
         aggregate = _aggregate_of(inner, exp)
+        if aggregate is None:
+            aggregate = _ratio_aggregate(inner, exp)
         if aggregate is not None:
             alias = alias_node.alias if alias_node is not None else ""
             aggregate = Aggregate(
@@ -113,6 +136,7 @@ def parse_primary(sql: str, *, dialect: str | None = None) -> ParsedQuery:
                 expression=aggregate.expression,
                 alias=(alias or inner.alias).lower(),
                 fields=aggregate.fields,
+                ratio=aggregate.ratio,
             )
             aggregates.append(aggregate)
         columns |= _columns_in(projection, exp)

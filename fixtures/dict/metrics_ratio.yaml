@@ -1,0 +1,60 @@
+# Synthetic ratio-metric dictionary for the offline demo. All names are fictional.
+version: 1
+metrics:
+  - metric: order_gmv
+    owner: growth_analytics
+    description: 支付成功订单的成交金额合计
+    source_tables: [fact_order]
+    source_fields: [pay_amount, order_paid_at, order_status]
+    aggregation: sum
+    filter_expr: "order_status = 'paid'"
+    granularity: day
+    version: 1.4.0
+
+  - metric: paid_order_count
+    owner: trade_operations
+    description: 支付成功的去重订单数
+    source_tables: [fact_order]
+    source_fields: [order_id, order_paid_at, order_status]
+    aggregation: count_distinct
+    filter_expr: "order_status = 'paid'"
+    granularity: day
+    version: 2.0.0
+
+  - metric: avg_order_value
+    owner: trade_operations
+    description: 支付成功订单的客单价：成交金额合计除以去重订单数
+    source_tables: [fact_order]
+    source_fields: [pay_amount, order_id, order_paid_at, order_status]
+    aggregation: ratio
+    filter_expr: "order_status = 'paid'"
+    granularity: day
+    version: 1.0.0
+    ratio:
+      kind: population_ratio
+      numerator:
+        aggregation: sum
+        field: pay_amount
+      denominator:
+        aggregation: count_distinct
+        field: order_id
+      zero_division: nullif
+
+  - metric: avg_basket_value
+    owner: trade_operations
+    description: 单笔订单平均成交金额：逐单金额比率的平均
+    source_tables: [fact_order]
+    source_fields: [pay_amount, quantity, order_paid_at, order_status]
+    aggregation: ratio
+    filter_expr: "order_status = 'paid'"
+    granularity: day
+    version: 1.0.0
+    ratio:
+      kind: average_ratio
+      numerator:
+        aggregation: avg
+        field: pay_amount
+      denominator:
+        aggregation: avg
+        field: quantity
+      zero_division: nullif

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from . import __version__
-from .compare import Finding, compare_reports, failing_categories, summarise
+from .compare import Finding, compare_reports, failing_categories, summarise, summarise_extra
 from .config import (
     CATEGORIES,
     DEFAULT_DB,
@@ -100,6 +100,7 @@ def run_check(report_dir: str | Path, *, dict_path: str | Path = DEFAULT_DICT,
             print(f"parsed {report_path.name} via {parsed.source}", file=sys.stderr)
     findings = compare_reports(parsed_reports, dictionary)
     counts = summarise(findings)
+    extra_counts = summarise_extra(findings)
     batch_id = make_batch_id(dictionary.fingerprint, now)
     batch = {
         "batch_id": batch_id,
@@ -109,6 +110,8 @@ def run_check(report_dir: str | Path, *, dict_path: str | Path = DEFAULT_DICT,
         "counts": counts,
         "parser_mode": parser_mode,
     }
+    if extra_counts:
+        batch["extra_counts"] = extra_counts
     store = Store(db_path)
     store.save_batch(
         batch,
@@ -123,6 +126,9 @@ def run_check(report_dir: str | Path, *, dict_path: str | Path = DEFAULT_DICT,
 def _print_summary(result: CheckResult) -> None:
     batch = result.batch
     counts = " ".join(f"{name}={batch['counts'][name]}" for name in CATEGORIES)
+    extra = batch.get("extra_counts") or {}
+    if "undetermined" in extra:
+        counts += f" undetermined={extra['undetermined']}"
     print(f"batch={batch['batch_id']} reports={batch['report_count']} {counts}")
     print(
         "reports: "

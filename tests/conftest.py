@@ -15,12 +15,19 @@ from koujing.sql_parse import parse_sql  # noqa: E402
 FIXTURES = ROOT / "fixtures"
 DICT_YAML = FIXTURES / "dict" / "metrics.yaml"
 DICT_MIN = FIXTURES / "dict" / "metrics_min.yaml"
+DICT_RATIO = FIXTURES / "dict" / "metrics_ratio.yaml"
 REPORT_DIR = FIXTURES / "reports"
+RATIO_REPORT_DIR = FIXTURES / "ratio_reports"
 
 
 @pytest.fixture(scope="session")
 def dictionary():
     return load_dictionary(DICT_YAML, yaml_backend="lite")
+
+
+@pytest.fixture(scope="session")
+def ratio_dictionary():
+    return load_dictionary(DICT_RATIO, yaml_backend="lite")
 
 
 @pytest.fixture(scope="session")
