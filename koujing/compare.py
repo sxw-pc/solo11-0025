@@ -7,6 +7,7 @@ from typing import Any, Iterable
 
 from .config import CATEGORIES, CATEGORY_ORDER
 from .dict_load import Dictionary, Metric
+from .relationship import UNDECIDABLE, evaluate_join
 from .sql_parse.common import extract_identifiers
 from .sql_parse.model import ParsedQuery
 
@@ -58,8 +59,9 @@ def _observed_fields(parsed: ParsedQuery, aggregate) -> tuple[str, ...]:
 
 def _evidence(metric: str, parsed: ParsedQuery, observed: dict[str, Any],
               differences: list[dict[str, Any]], alias: str,
-              expected: dict[str, Any] | None) -> dict[str, Any]:
-    return {
+              expected: dict[str, Any] | None,
+              join_verdict: dict[str, Any] | None = None) -> dict[str, Any]:
+    evidence = {
         "report": "",
         "metric": metric,
         "aggregate_alias": alias,
@@ -69,14 +71,19 @@ def _evidence(metric: str, parsed: ParsedQuery, observed: dict[str, Any],
         "observed": observed,
         "differences": differences,
         "warnings": list(parsed.warnings),
+        "observed_joins": [join.to_dict() for join in parsed.joins],
     }
+    if join_verdict is not None:
+        evidence["join_verdict"] = join_verdict
+    return evidence
 
 
 def _finding(report: str, category: str, metric: str, parsed: ParsedQuery,
              summary: str, differences: list[dict[str, Any]],
              observed: dict[str, Any], expected: dict[str, Any] | None,
-             alias: str) -> Finding:
-    evidence = _evidence(metric, parsed, observed, differences, alias, expected)
+             alias: str, join_verdict: dict[str, Any] | None = None) -> Finding:
+    evidence = _evidence(metric, parsed, observed, differences, alias, expected,
+                         join_verdict)
     evidence["report"] = report
     return Finding(
         report=report,
@@ -106,6 +113,7 @@ def _compare_metric(report: str, parsed: ParsedQuery, aggregate,
         "granularity": parsed.granularity,
         "group_by": list(parsed.group_by),
         "aggregate_expression": aggregate.expression,
+        "joins": [join.to_dict() for join in parsed.joins],
     }
     differences: list[dict[str, Any]] = []
     if parsed.tables != metric.source_tables:
@@ -126,18 +134,55 @@ def _compare_metric(report: str, parsed: ParsedQuery, aggregate,
         differences.append(_difference("granularity", metric.granularity,
                                        parsed.granularity))
 
+    # Optional relationship contract: only metrics that explicitly declare one
+    # are checked; legacy metrics keep the original comparison untouched.
+    verdict = evaluate_join(parsed, metric.join_contract)
+    verdict_dict = verdict.to_dict() if verdict is not None else None
+    join_failed = verdict is not None and not verdict.provable
+    if join_failed:
+        join_difference = _difference(
+            "join_contract",
+            metric.join_contract.to_dict(),
+            {
+                "join_type": verdict.actual_join_type,
+                "pairs": [dict(item) for item in verdict.actual_pairs],
+                "status": verdict.status,
+            },
+        )
+        join_difference["verdict"] = verdict.status
+        join_difference["reasons"] = list(verdict.reasons)
+        if verdict.missing_pairs:
+            join_difference["missing_key_pairs"] = [
+                dict(item) for item in verdict.missing_pairs
+            ]
+        if verdict.mismatched_pairs:
+            join_difference["wrong_column_pairs"] = [
+                dict(item) for item in verdict.mismatched_pairs
+            ]
+        if verdict.uncovered_key_columns:
+            join_difference["uncovered_unique_key_columns"] = list(
+                verdict.uncovered_key_columns
+            )
+        if verdict.parser_reasons:
+            join_difference["parser_reasons"] = list(verdict.parser_reasons)
+        differences.append(join_difference)
+
     expected = metric.to_dict()
     if missing or extra:
         category = "missing_field"
         summary = "字段与口径字典不一致"
     elif differences:
         category = "drift"
-        summary = "聚合、过滤或粒度与口径字典不一致"
+        if join_failed:
+            summary = ("连接关系无法证明为多对一" if verdict.status == UNDECIDABLE
+                       else "连接关系与口径字典契约不一致")
+        else:
+            summary = "聚合、过滤或粒度与口径字典不一致"
     else:
         category = "consistent"
         summary = "与口径字典一致"
     return _finding(report, category, metric.metric, parsed, summary, differences,
-                    observed, expected, aggregate.alias)
+                    observed, expected, aggregate.alias, verdict_dict)
 
 
 def _compare_unregistered(report: str, parsed: ParsedQuery, aggregate) -> Finding:

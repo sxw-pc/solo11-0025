@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import re
 
-from .common import extract_identifiers, line_range, split_top_level, strip_comments, top_level_words
+from .common import (
+    extract_identifiers,
+    line_range,
+    split_top_level,
+    strip_comments,
+    top_level_words,
+)
+from .joins import extract_joins
 from .model import Aggregate, ParsedQuery, canonical_expr, detect_granularity, sort_unique
 
 AGGREGATE_RE = re.compile(
@@ -147,6 +154,7 @@ def parse_fallback(sql: str, *, source: str = "fallback",
             warnings=tuple(warnings + ["no SELECT statement found"]),
             line_start=start_line,
             line_end=end_line,
+            joins=(),
         )
 
     if "from" not in sections:
@@ -160,6 +168,7 @@ def parse_fallback(sql: str, *, source: str = "fallback",
         warnings.append("subquery in FROM is only partially supported")
 
     tables = _tables(sections.get("from", ""))
+    joins = extract_joins(sections.get("from", ""))
     aggregates, select_fields = _select_parts(sections.get("select", ""))
     where_expr = canonical_expr(sections.get("where", ""))
     group_exprs = tuple(
@@ -186,4 +195,5 @@ def parse_fallback(sql: str, *, source: str = "fallback",
         warnings=tuple(dict.fromkeys(warnings)),
         line_start=start_line,
         line_end=end_line,
+        joins=joins,
     )

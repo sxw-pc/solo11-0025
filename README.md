@@ -95,6 +95,37 @@ metrics:
 
 校验会一次性返回结构化错误列表（`missing_field`、`duplicate_metric`、`invalid_aggregation`、`empty_source_fields` 等），CLI 以退出码 2 结束。字典经字段小写化、列表排序去重、表达式空白规范化后计算 `sha256` 指纹，用于批次追溯和字典快照。
 
+### 可选：连接关系契约（`join_contract`）
+
+涉及两张来源表的指标可以**选填**一份显式连接声明，用于静态判断报表聚合所经过的连接能否被证明为多对一。契约只是声明，不执行 SQL，也不把候选唯一键当成「右表数据真的唯一」的运行时证明。
+
+| 字段 | 必填 | 说明 |
+| --- | :---: | --- |
+| `join_type` | 是 | 仅支持 `inner` / `left`，须与 SQL 的保留侧一致 |
+| `left_table` / `right_table` | 是 | 左右角色绑定的物理表，须包含在 `source_tables` 中 |
+| `on` | 是 | 成对连接列列表，每项含 `left_column` / `right_column`（可再显式写 `left_table` / `right_table`，须与角色一致） |
+| `right_unique_key` | 是 | 右表候选唯一键，每个分量都必须出现在 `on` 的右端 |
+
+```yaml
+    join_contract:
+      join_type: left
+      left_table: fact_order
+      right_table: dim_shop
+      on:
+        - left_column: shop_id
+          right_column: shop_id
+        - left_column: city_id
+          right_column: city_id
+      right_unique_key: [shop_id, city_id]
+```
+
+核对仅覆盖**单层、恰好两张物理表、`INNER JOIN` / `LEFT JOIN`、ON 为限定列等值合取**的有界语法，并保持表别名到物理表/列的绑定：
+
+- 等式左右交换、多个等值项调整顺序不改变判定；同样的表与字段集合，只要键的配对不同，结论仍可能不同。
+- 联合键必须完整覆盖：漏掉键分量记 `missing_key_pair`，连到错误列记 `join_column_mismatch`，右表候选唯一键分量未被连接覆盖记 `unique_key_component_not_covered`，保留侧/表角色不符记 `preserved_side_mismatch` / `table_role_mismatch`，连接类型不符记 `join_type_mismatch`。
+- OR 条件、非等值连接、逗号/CROSS/NATURAL/RIGHT/FULL JOIN、USING、子查询或多层连接等超出有界语法的形状一律返回 `undecidable`，**不会被当作安全连接**。
+- 期望与实际键配对、基数能否证明（`many_to_one_provable` / `not_provable` / `undecidable`）及失败原因随 finding 证据（`evidence.join_verdict`）保存；无法证明或无法判定时归入既有 `drift` 结论。未声明 `join_contract` 的旧指标完全沿用原规则，不产生连接证据。
+
 ## 四类结论
 
 | 结论 | 触发条件 | 反例（不会命中） |

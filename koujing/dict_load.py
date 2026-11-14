@@ -22,6 +22,49 @@ class DictValidationError(ValueError):
 
 
 @dataclass(frozen=True)
+class JoinKeyPair:
+    """One declared equality pairing: ``left_table.left_column`` to ``right_table.right_column``."""
+
+    left_table: str
+    left_column: str
+    right_table: str
+    right_column: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "left_table": self.left_table,
+            "left_column": self.left_column,
+            "right_table": self.right_table,
+            "right_column": self.right_column,
+        }
+
+
+@dataclass(frozen=True)
+class JoinContract:
+    """Optional, explicit relationship declaration for one bounded two-table join.
+
+    The contract is a *declaration*: it states which equality pairs and which
+    candidate unique key on the right table the metric author relies on. It
+    never proves the right table is actually unique at runtime.
+    """
+
+    join_type: str
+    left_table: str
+    right_table: str
+    on: tuple[JoinKeyPair, ...]
+    right_unique_key: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "join_type": self.join_type,
+            "left_table": self.left_table,
+            "right_table": self.right_table,
+            "on": [pair.to_dict() for pair in self.on],
+            "right_unique_key": list(self.right_unique_key),
+        }
+
+
+@dataclass(frozen=True)
 class Metric:
     metric: str
     owner: str
@@ -32,9 +75,10 @@ class Metric:
     filter_expr: str
     granularity: str
     version: str
+    join_contract: JoinContract | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "metric": self.metric,
             "owner": self.owner,
             "description": self.description,
@@ -45,6 +89,9 @@ class Metric:
             "granularity": self.granularity,
             "version": self.version,
         }
+        if self.join_contract is not None:
+            data["join_contract"] = self.join_contract.to_dict()
+        return data
 
 
 @dataclass(frozen=True)
@@ -122,6 +169,140 @@ def _as_list(value: Any, *, field: str, index: int, metric: str,
     return sort_unique(cleaned)
 
 
+def _normalise_name(value: Any) -> str:
+    return str(value).strip().strip("`\"[]").lower()
+
+
+def _validate_contract_pairs(raw_pairs: Any, *, index: int, metric: str,
+                             errors: list[dict[str, Any]]) -> None:
+    """Structurally validate the ``on`` pairing list, appending any errors."""
+    if not isinstance(raw_pairs, (list, tuple)):
+        errors.append(_error("invalid_join_contract",
+                             "join_contract.on must be a list of column pairings",
+                             index=index, metric=metric, field="join_contract.on"))
+        return
+    for position, pair in enumerate(raw_pairs):
+        if not isinstance(pair, dict):
+            errors.append(_error("invalid_join_contract",
+                                 f"join_contract.on[{position}] must be a mapping",
+                                 index=index, metric=metric, field="join_contract.on"))
+            continue
+        left_col = _normalise_name(pair.get("left_column", ""))
+        right_col = _normalise_name(pair.get("right_column", ""))
+        if not left_col or not right_col:
+            errors.append(_error("invalid_join_contract",
+                                 f"join_contract.on[{position}] requires left_column "
+                                 "and right_column",
+                                 index=index, metric=metric, field="join_contract.on"))
+
+
+def _normalise_join_contract(raw: Any, *, index: int, metric: str,
+                             errors: list[dict[str, Any]]) -> JoinContract | None:
+    if raw in (None, ""):
+        return None
+    if not isinstance(raw, dict):
+        errors.append(_error("invalid_join_contract",
+                             "join_contract must be a mapping",
+                             index=index, metric=metric, field="join_contract"))
+        return None
+    join_type = _normalise_name(raw.get("join_type", ""))
+    if join_type not in {"inner", "left"}:
+        errors.append(_error("invalid_join_contract",
+                             "join_contract.join_type must be 'inner' or 'left'",
+                             index=index, metric=metric,
+                             field="join_contract.join_type"))
+    left_table = _normalise_name(raw.get("left_table", ""))
+    right_table = _normalise_name(raw.get("right_table", ""))
+    for column_name, value in (("left_table", left_table), ("right_table", right_table)):
+        if not value:
+            errors.append(_error("invalid_join_contract",
+                                 f"join_contract.{column_name} is required",
+                                 index=index, metric=metric,
+                                 field=f"join_contract.{column_name}"))
+    if left_table and right_table and left_table == right_table:
+        errors.append(_error("invalid_join_contract",
+                             "join_contract.left_table and right_table must differ",
+                             index=index, metric=metric, field="join_contract"))
+
+    # YAML 1.1 parsers (notably PyYAML) read the bare key ``on`` as the
+    # boolean True, so accept both spellings transparently.
+    raw_pairs = raw.get("on")
+    if raw_pairs is None:
+        raw_pairs = raw.get(True)
+    _validate_contract_pairs(raw_pairs, index=index, metric=metric, errors=errors)
+    pairs: list[JoinKeyPair] = []
+    if isinstance(raw_pairs, (list, tuple)):
+        for pair in raw_pairs:
+            if not isinstance(pair, dict):
+                continue
+            left_col = _normalise_name(pair.get("left_column", ""))
+            right_col = _normalise_name(pair.get("right_column", ""))
+            if not left_col or not right_col:
+                continue
+            pair_left_table = _normalise_name(pair.get("left_table", left_table)) or left_table
+            pair_right_table = _normalise_name(pair.get("right_table", right_table)) or right_table
+            if pair_left_table != left_table or pair_right_table != right_table:
+                errors.append(_error("invalid_join_contract",
+                                     "join_contract.on pair references tables other than "
+                                     "the declared left_table/right_table",
+                                     index=index, metric=metric,
+                                     field="join_contract.on"))
+            pairs.append(JoinKeyPair(
+                left_table=pair_left_table,
+                left_column=left_col,
+                right_table=pair_right_table,
+                right_column=right_col,
+            ))
+    if not pairs:
+        errors.append(_error("invalid_join_contract",
+                             "join_contract.on must declare at least one equality pair",
+                             index=index, metric=metric, field="join_contract.on"))
+    seen_pairs: set[tuple[str, str]] = set()
+    for pair in pairs:
+        signature = (pair.left_column, pair.right_column)
+        if signature in seen_pairs:
+            errors.append(_error("invalid_join_contract",
+                                 "duplicate equality pair in join_contract.on",
+                                 index=index, metric=metric, field="join_contract.on"))
+        seen_pairs.add(signature)
+
+    unique_key = ()
+    raw_key = raw.get("right_unique_key")
+    if raw_key in (None, ""):
+        errors.append(_error("invalid_join_contract",
+                             "join_contract.right_unique_key is required",
+                             index=index, metric=metric,
+                             field="join_contract.right_unique_key"))
+    else:
+        unique_key = _as_list(raw_key, field="join_contract.right_unique_key",
+                              index=index, metric=metric, errors=errors)
+        if isinstance(raw_key, (list, tuple)) and not unique_key:
+            errors.append(_error("invalid_join_contract",
+                                 "join_contract.right_unique_key must not be empty",
+                                 index=index, metric=metric,
+                                 field="join_contract.right_unique_key"))
+        if unique_key:
+            key_set = set(unique_key)
+            paired_right = {pair.right_column for pair in pairs}
+            uncovered = sorted(key_set - paired_right)
+            if uncovered:
+                errors.append(_error("invalid_join_contract",
+                                     "right_unique_key columns missing from join_contract.on "
+                                     f"right side: {', '.join(uncovered)}",
+                                     index=index, metric=metric,
+                                     field="join_contract.right_unique_key"))
+    if errors:
+        return None
+    ordered_pairs = tuple(sorted(pairs, key=lambda item: (item.left_column, item.right_column)))
+    return JoinContract(
+        join_type=join_type,
+        left_table=left_table,
+        right_table=right_table,
+        on=ordered_pairs,
+        right_unique_key=unique_key,
+    )
+
+
 def _normalise_metric(raw: Any, index: int, errors: list[dict[str, Any]]) -> Metric | None:
     if not isinstance(raw, dict):
         errors.append(_error("invalid_metric", "each metric must be a mapping", index=index))
@@ -163,6 +344,18 @@ def _normalise_metric(raw: Any, index: int, errors: list[dict[str, Any]]) -> Met
     filter_expr = canonical_expr(raw.get("filter_expr"))
     granularity = str(raw.get("granularity", "")).strip().lower()
     version = str(raw.get("version", "")).strip()
+    join_contract = _normalise_join_contract(
+        raw.get("join_contract"), index=index, metric=name, errors=errors
+    )
+    if join_contract is not None and tables:
+        contract_tables = {join_contract.left_table, join_contract.right_table}
+        unknown = sorted(contract_tables - set(tables))
+        if unknown:
+            errors.append(_error("invalid_join_contract",
+                                 "join_contract tables not declared in source_tables: "
+                                 f"{', '.join(unknown)}",
+                                 index=index, metric=name, field="join_contract"))
+            join_contract = None
     return Metric(
         metric=name,
         owner=owner,
@@ -173,6 +366,7 @@ def _normalise_metric(raw: Any, index: int, errors: list[dict[str, Any]]) -> Met
         filter_expr=filter_expr,
         granularity=granularity,
         version=version,
+        join_contract=join_contract,
     )
 
 

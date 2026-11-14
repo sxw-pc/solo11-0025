@@ -7,6 +7,66 @@ from dataclasses import asdict, dataclass, field
 
 
 @dataclass(frozen=True)
+class ColumnRef:
+    """A qualified column endpoint bound to a table alias.
+
+    ``alias`` is the alias token actually written in the SQL (or the physical
+    table name when the table has no explicit alias); ``table`` is the physical
+    table that alias is bound to and ``column`` the physical column name.
+    """
+
+    alias: str
+    table: str
+    column: str
+
+    def to_dict(self) -> dict:
+        return {"alias": self.alias, "table": self.table, "column": self.column}
+
+
+@dataclass(frozen=True)
+class JoinEquality:
+    """One conjunct ``left.column = right.column`` inside a JOIN ON clause."""
+
+    left: ColumnRef
+    right: ColumnRef
+
+    def to_dict(self) -> dict:
+        return {"left": self.left.to_dict(), "right": self.right.to_dict()}
+
+
+@dataclass(frozen=True)
+class JoinSpec:
+    """The bounded, parser-neutral description of one two-table join.
+
+    Only single-level, two-table INNER/LEFT joins with an equality-conjunct
+    ON clause are described. Anything outside that subset leaves
+    ``decidable`` False and records ``undecidable_reasons`` instead of
+    pretending the relationship is known.
+    """
+
+    join_type: str
+    left_alias: str
+    left_table: str
+    right_alias: str
+    right_table: str
+    equalities: tuple[JoinEquality, ...]
+    decidable: bool
+    undecidable_reasons: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict:
+        return {
+            "join_type": self.join_type,
+            "left_alias": self.left_alias,
+            "left_table": self.left_table,
+            "right_alias": self.right_alias,
+            "right_table": self.right_table,
+            "equalities": [item.to_dict() for item in self.equalities],
+            "decidable": self.decidable,
+            "undecidable_reasons": list(self.undecidable_reasons),
+        }
+
+
+@dataclass(frozen=True)
 class Aggregate:
     """One aggregate projection such as ``SUM(pay_amount) AS order_gmv``."""
 
@@ -38,10 +98,12 @@ class ParsedQuery:
     warnings: tuple[str, ...]
     line_start: int
     line_end: int
+    joins: tuple[JoinSpec, ...] = ()
 
     def to_dict(self) -> dict:
         data = asdict(self)
         data["aggregates"] = [agg.to_dict() for agg in self.aggregates]
+        data["joins"] = [join.to_dict() for join in self.joins]
         return data
 
     def comparable(self) -> dict:
@@ -53,6 +115,7 @@ class ParsedQuery:
             "filter_expr": self.filter_expr,
             "group_by": list(self.group_by),
             "granularity": self.granularity,
+            "joins": [join.to_dict() for join in self.joins],
         }
 
 
