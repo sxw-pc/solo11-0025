@@ -10,7 +10,14 @@ from .common import (
     strip_comments,
     top_level_words,
 )
-from .model import Aggregate, ParsedQuery, canonical_expr, detect_granularity, sort_unique
+from .model import (
+    Aggregate,
+    ParsedQuery,
+    canonical_expr,
+    canonical_expr_surface,
+    detect_granularity,
+    sort_unique,
+)
 
 
 class PrimaryParserUnavailable(RuntimeError):
@@ -125,6 +132,9 @@ def parse_primary(sql: str, *, dialect: str | None = None) -> ParsedQuery:
         columns |= _columns_in(group_node, exp)
 
     filter_expr = canonical_expr(where_node.this.sql()) if where_node is not None else ""
+    filter_expr_surface = (
+        canonical_expr_surface(where_node.this.sql()) if where_node is not None else ""
+    )
     group_by = ()
     if group_node is not None:
         group_by = tuple(sorted({
@@ -144,4 +154,5 @@ def parse_primary(sql: str, *, dialect: str | None = None) -> ParsedQuery:
         warnings=_warnings(clean, ordered_aggregates, tuple(sorted(table_names))),
         line_start=start_line,
         line_end=end_line,
+        filter_expr_surface=filter_expr_surface,
     )

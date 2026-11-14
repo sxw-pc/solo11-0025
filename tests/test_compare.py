@@ -50,11 +50,11 @@ def test_drift_reports_exact_aggregation_difference(dictionary):
     findings = [item for item in reports_for(dictionary) if item.category == "drift"]
     assert len(findings) == 1
     difference = findings[0].differences[0]
-    assert difference == {
-        "field": "aggregation",
-        "expected": "count_distinct",
-        "actual": "count",
-    }
+    assert difference["field"] == "aggregation"
+    assert difference["expected"] == "count_distinct"
+    assert difference["actual"] == "count"
+    assert difference["kind"] == "real_deviation"
+    assert difference["label"] == "真实偏差"
 
 
 def test_filter_drift_is_also_detected(dictionary):

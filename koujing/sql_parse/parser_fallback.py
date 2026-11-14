@@ -5,7 +5,14 @@ from __future__ import annotations
 import re
 
 from .common import extract_identifiers, line_range, split_top_level, strip_comments, top_level_words
-from .model import Aggregate, ParsedQuery, canonical_expr, detect_granularity, sort_unique
+from .model import (
+    Aggregate,
+    ParsedQuery,
+    canonical_expr,
+    canonical_expr_surface,
+    detect_granularity,
+    sort_unique,
+)
 
 AGGREGATE_RE = re.compile(
     r"^(count|sum|avg|max|min)\s*\((.*)\)\s*(?:(?:as\s+)?([A-Za-z_][A-Za-z0-9_]*))?\s*$",
@@ -162,6 +169,7 @@ def parse_fallback(sql: str, *, source: str = "fallback",
     tables = _tables(sections.get("from", ""))
     aggregates, select_fields = _select_parts(sections.get("select", ""))
     where_expr = canonical_expr(sections.get("where", ""))
+    where_surface = canonical_expr_surface(sections.get("where", ""))
     group_exprs = tuple(
         sorted({canonical_expr(item) for item in split_top_level(sections.get("group", "")) if item})
     )
@@ -186,4 +194,5 @@ def parse_fallback(sql: str, *, source: str = "fallback",
         warnings=tuple(dict.fromkeys(warnings)),
         line_start=start_line,
         line_end=end_line,
+        filter_expr_surface=where_surface,
     )

@@ -82,6 +82,17 @@ def _difference_lines(item: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _annotation_lines(item: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for annotation in item.get("annotations", []):
+        lines.append(
+            f"  - `{annotation.get('field')}`: {annotation.get('label', '等价但写法不同')}"
+            f"（字典 `{annotation.get('expected_surface')}`"
+            f" / 报表 `{annotation.get('actual_surface')}`）"
+        )
+    return lines
+
+
 def render_markdown(batch: dict[str, Any], findings: Iterable[Finding | dict[str, Any]]) -> str:
     payload = build_payload(batch, findings)
     batch_data = payload["batch"]
@@ -118,6 +129,9 @@ def render_markdown(batch: dict[str, Any], findings: Iterable[Finding | dict[str
                 lines.extend(_difference_lines(item))
             else:
                 lines.append("- 差异：无")
+            annotations = item.get("annotations", [])
+            if annotations:
+                lines.extend(_annotation_lines(item))
             warnings = item.get("evidence", {}).get("warnings", [])
             if warnings:
                 lines.append("- 解析警告：" + "；".join(str(warning) for warning in warnings))
@@ -130,8 +144,9 @@ def _html_finding(item: dict[str, Any]) -> str:
     differences = item.get("differences", [])
     if differences:
         diff_html = "<ul>" + "".join(
-            "<li><code>{}</code> 期望 <code>{}</code> / 实际 <code>{}</code></li>".format(
+            "<li><code>{}</code> <span class=\"kind\">{}</span> 期望 <code>{}</code> / 实际 <code>{}</code></li>".format(
                 html.escape(str(diff.get("field"))),
+                html.escape(str(diff.get("label", "真实偏差"))),
                 html.escape(json.dumps(diff.get("expected"), ensure_ascii=False)),
                 html.escape(json.dumps(diff.get("actual"), ensure_ascii=False)),
             )
@@ -139,6 +154,17 @@ def _html_finding(item: dict[str, Any]) -> str:
         ) + "</ul>"
     else:
         diff_html = "<p class=\"muted\">无差异</p>"
+    annotations = item.get("annotations", [])
+    if annotations:
+        diff_html += "<ul>" + "".join(
+            "<li><code>{}</code> <span class=\"kind\">{}</span> 字典拼写 <code>{}</code> / 报表拼写 <code>{}</code></li>".format(
+                html.escape(str(annotation.get("field"))),
+                html.escape(str(annotation.get("label", "等价但写法不同"))),
+                html.escape(str(annotation.get("expected_surface", ""))),
+                html.escape(str(annotation.get("actual_surface", ""))),
+            )
+            for annotation in annotations
+        ) + "</ul>"
     warnings = item.get("evidence", {}).get("warnings", [])
     warning_html = ""
     if warnings:
@@ -179,7 +205,8 @@ header div{max-width:1040px;margin:auto}h1{margin:0 0 8px;font-size:26px}h2{marg
 .meta{color:#d9e2ec;font-size:13px}.toc{display:flex;gap:10px;flex-wrap:wrap;margin-top:20px}.toc a{background:#fff;border:1px solid #cbd5df;border-radius:999px;padding:6px 12px;color:#102a43;text-decoration:none}
 .toc span,.pill{background:#e6edf3;border-radius:999px;padding:1px 8px;font-size:12px}.finding{background:#fff;border:1px solid #d9e2ec;border-radius:10px;padding:16px 18px;margin:12px 0}
 .finding h3{margin:0 0 4px;font-size:16px}code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;background:#eef2f6;padding:1px 4px;border-radius:4px}
-.muted{color:#627d98}.warn{color:#9a6700;background:#fff8e1;padding:8px;border-radius:6px}footer{color:#627d98;margin-top:40px;font-size:12px}
+.muted{color:#627d98}.warn{color:#9a6700;background:#fff8e1;padding:8px;border-radius:6px}
+.kind{background:#e3f2fd;color:#0b4f6c;border-radius:999px;padding:1px 6px;font-size:12px}footer{color:#627d98;margin-top:40px;font-size:12px}
 """
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">

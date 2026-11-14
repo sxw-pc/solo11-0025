@@ -10,7 +10,7 @@ from typing import Any
 
 from . import yaml_lite
 from .config import AGGREGATIONS, AGGREGATION_ALIASES, METRIC_REQUIRED, canonical_json, sha256_text
-from .sql_parse.model import canonical_expr, sort_unique
+from .sql_parse.model import canonical_expr, canonical_expr_surface, sort_unique
 
 
 class DictValidationError(ValueError):
@@ -32,6 +32,9 @@ class Metric:
     filter_expr: str
     granularity: str
     version: str
+    # Surface spelling kept for reporting only. It never participates in the
+    # fingerprint, so equivalent AND orderings share one dictionary identity.
+    filter_expr_surface: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -161,6 +164,7 @@ def _normalise_metric(raw: Any, index: int, errors: list[dict[str, Any]]) -> Met
     owner = str(raw.get("owner", "")).strip()
     description = str(raw.get("description", "")).strip()
     filter_expr = canonical_expr(raw.get("filter_expr"))
+    filter_expr_surface = canonical_expr_surface(raw.get("filter_expr"))
     granularity = str(raw.get("granularity", "")).strip().lower()
     version = str(raw.get("version", "")).strip()
     return Metric(
@@ -173,6 +177,7 @@ def _normalise_metric(raw: Any, index: int, errors: list[dict[str, Any]]) -> Met
         filter_expr=filter_expr,
         granularity=granularity,
         version=version,
+        filter_expr_surface=filter_expr_surface,
     )
 
 

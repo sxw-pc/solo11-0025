@@ -213,6 +213,8 @@ class Store:
             ).fetchall()
         findings: list[dict[str, Any]] = []
         for row in rows:
+            evidence = json.loads(row["evidence_json"])
+            annotations = evidence.get("annotations", []) if isinstance(evidence, dict) else []
             findings.append({
                 "report": row["report"],
                 "category": row["category"],
@@ -223,7 +225,8 @@ class Store:
                 "line_range": [row["line_start"], row["line_end"]],
                 "summary": row["summary"],
                 "differences": json.loads(row["differences_json"]),
-                "evidence": json.loads(row["evidence_json"]),
+                "annotations": annotations,
+                "evidence": evidence,
             })
         return findings
 
